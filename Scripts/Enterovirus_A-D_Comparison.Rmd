@@ -1,0 +1,1364 @@
+---
+title: "Enterovirus_A-D_Comparison"
+output: html_document
+date: "2025-08-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(rstatix)
+library(ggpubr)
+library(ggprism)
+library(ggpattern)
+library(ggdist)
+library(ggnewscale)
+library(corrplot)
+library(GGally)
+library(gt)
+library(coda)
+library(ips)
+```
+
+#Species Names w/ Type Examples Table
+```{r}
+Species <- c("Enterovirus A", "Enterovirus B", "Enterovirus C", "Enterovirus D")
+Type_Examples <- c("Enterovirus A71 (EV-A71), Coxsackievirus A16 (CVA16), Coxsackievirus A6 (CVA6)", "Echovirus 11 (E11), Coxsackievirus B3 (CVB3), Coxsackievirus A9 (CVA9)", "Poliovirus 1 (PV1), Poliovirus 3 (PV3), Coxsackievirus A24 (CVA24)", "Enterovirus D68 (EV-D68), Enterovirus D70 (EV-D70), Enterovirus D94 (EV-D94)")
+
+as.data.frame(cbind(Species, Type_Examples)) %>%
+  dplyr::rename(`Selected Types` = Type_Examples) %>%
+  gt() %>%
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels()) %>%
+  cols_width(Species ~ px(250), `Selected Types` ~ px(650)) %>%
+  tab_options(table.width = "900px") %>%
+  gtsave("EV_Type_Table.png")
+```
+
+#Entropy Comparison - Species Level
+```{r}
+EVA_Entropy = read_csv("Enterovirus_A/EVA_Entropy_Data.csv") %>%
+  mutate(Species = "EVA")
+EVB_Entropy = read_csv("Enterovirus_B/EVB_Entropy_Data.csv") %>%
+  mutate(Species = "EVB")
+EVC_Entropy = read_csv("Enterovirus_C/EVC_Entropy_Data.csv") %>%
+  mutate(Species = "EVC")
+EVD_Entropy = read_csv("Enterovirus_D/EVD_Entropy_Data.csv") %>%
+  mutate(Species = "EVD")
+
+All_Entropy_Values = rbind(EVA_Entropy, EVB_Entropy, EVC_Entropy, EVD_Entropy)
+```
+
+Whole genome
+```{r}
+Whole_Species_Entropies = All_Entropy_Values %>%
+  filter(Metric == "Species Entropy")
+
+Whole_Species_Entropy_Summary = Whole_Species_Entropies %>%
+  group_by(Species) %>%
+  summarise(Mean_Entropy = mean(Value), SE_Entropy = sd(Value)/sqrt(n()))
+```
+
+Structural
+```{r}
+Whole_Species_Entropies_Structural = Whole_Species_Entropies %>%
+  filter(Region == "Structural") 
+
+Whole_Species_Entropy_Structural_Summary = Whole_Species_Entropies_Structural %>%
+  group_by(Species) %>%
+  summarise(Mean_Structural_Entropy = mean(Value), SE_Structural_Entropy = sd(Value)/sqrt(n()))
+
+Whole_Species_Entropies_Structural_Comparisons = dunn_test(Value ~ Species, data = Whole_Species_Entropies_Structural) %>%
+  filter(p.adj.signif != "ns") %>%
+  add_xy_position() %>%
+  select(-y.position) %>%
+  cbind(y.position = c(0.86, 0.9, 0.94))
+
+pdf("Whole_Species_Entropies_Structural.pdf", height = 3.5, width = 5)
+
+ggplot(Whole_Species_Entropies_Structural, aes(x = Value, color = Species)) +
+  stat_ecdf(linewidth = 1) +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  xlim(1, 0) +
+  xlab("Entropy") +
+  ylab("Cumulative Proportion") +
+  ggtitle("Structural Proteins") +
+  theme_prism() +
+  theme(legend.position = "none")
+
+dev.off()
+
+EVA_Structural_ecdf = ecdf(1 - (filter(EVA_Entropy, Region == "Structural")$Value))
+EVB_Structural_ecdf = ecdf(1 - (filter(EVB_Entropy, Region == "Structural")$Value))
+EVC_Structural_ecdf = ecdf(1 - (filter(EVC_Entropy, Region == "Structural")$Value))
+EVD_Structural_ecdf = ecdf(1 - (filter(EVD_Entropy, Region == "Structural")$Value))
+
+EVA_Structural_ecdf_auc = integrate(EVA_Structural_ecdf, 0, 1, subdivisions = 1000)
+EVB_Structural_ecdf_auc = integrate(EVB_Structural_ecdf, 0, 1, subdivisions = 1000)
+EVC_Structural_ecdf_auc = integrate(EVC_Structural_ecdf, 0, 1, subdivisions = 1000)
+EVD_Structural_ecdf_auc = integrate(EVD_Structural_ecdf, 0, 1, subdivisions = 1000)
+
+Species <- c("EVA", "EVB", "EVC", "EVD")
+AUC <- c(EVA_Structural_ecdf_auc[[1]], EVB_Structural_ecdf_auc[[1]], EVC_Structural_ecdf_auc[[1]], EVD_Structural_ecdf_auc[[1]])
+Abs_Error <- c(EVA_Structural_ecdf_auc[[2]], EVB_Structural_ecdf_auc[[2]], EVC_Structural_ecdf_auc[[2]], EVD_Structural_ecdf_auc[[2]])
+
+EV_Structural_ecdf_auc = as.data.frame(cbind(Species, AUC, Abs_Error)) %>%
+  mutate(AUC = as.numeric(AUC)) %>%
+  mutate(Abs_Error = as.numeric(Abs_Error))
+
+ks.test(1 - (filter(EVA_Entropy, Region == "Structural")$Value), 1 - (filter(EVB_Entropy, Region == "Structural")$Value))
+ks.test(1 - (filter(EVA_Entropy, Region == "Structural")$Value), 1 - (filter(EVC_Entropy, Region == "Structural")$Value))
+ks.test(1 - (filter(EVA_Entropy, Region == "Structural")$Value), 1 - (filter(EVD_Entropy, Region == "Structural")$Value))
+ks.test(1 - (filter(EVB_Entropy, Region == "Structural")$Value), 1 - (filter(EVC_Entropy, Region == "Structural")$Value))
+ks.test(1 - (filter(EVB_Entropy, Region == "Structural")$Value), 1 - (filter(EVD_Entropy, Region == "Structural")$Value))
+ks.test(1 - (filter(EVC_Entropy, Region == "Structural")$Value), 1 - (filter(EVD_Entropy, Region == "Structural")$Value))
+
+pdf("Whole_Species_Entropies_Structural_AUC.pdf", height = 3.5, width = 3.5)
+
+ggplot(EV_Structural_ecdf_auc, aes(x = Species, y = AUC, fill = Species, color = Species)) +
+  geom_bar(stat = "identity", linewidth = 2) +
+  geom_errorbar(aes(x = Species, ymin = AUC - Abs_Error, ymax = AUC + Abs_Error)) +
+  theme_prism() +
+  scale_fill_manual(values = c("#00008B99", "#FF149399", "#DAA52099", "#06402B99")) +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  ylim(0, 0.1) +
+  theme(legend.position = "none")
+
+dev.off()
+```
+
+Nonstructural
+```{r}
+Whole_Species_Entropies_Nonstructural = Whole_Species_Entropies %>%
+  filter(Region == "Nonstructural")
+
+Whole_Species_Entropy_Nonstructural_Summary = Whole_Species_Entropies_Nonstructural %>%
+  group_by(Species) %>%
+  summarise(Mean_Nonstructural_Entropy = mean(Value), SE_Nonstructural_Entropy = sd(Value)/sqrt(n()))
+
+Whole_Species_Entropies_Nonstructural_Comparisons = dunn_test(Value ~ Species, data = Whole_Species_Entropies_Nonstructural) %>%
+  filter(p.adj.signif != "ns") %>%
+  add_xy_position() %>%
+  select(-y.position) %>%
+  cbind(y.position = c(0.82, 0.86, 0.9))
+
+pdf("Whole_Species_Entropies_Nonstructural.pdf", height = 3.5, width = 5)
+
+ggplot(Whole_Species_Entropies_Nonstructural, aes(x = Value, color = Species)) +
+  stat_ecdf(linewidth = 1) +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  xlim(1, 0) +
+  xlab("Entropy") +
+  ylab("Cumulative Proportion") +
+  ggtitle("Nonstructural Proteins") +
+  theme_prism() +
+  theme(legend.position = "none")
+
+dev.off()
+
+EVA_Nonstructural_ecdf = ecdf(1 - (filter(EVA_Entropy, Region == "Nonstructural")$Value))
+EVB_Nonstructural_ecdf = ecdf(1 - (filter(EVB_Entropy, Region == "Nonstructural")$Value))
+EVC_Nonstructural_ecdf = ecdf(1 - (filter(EVC_Entropy, Region == "Nonstructural")$Value))
+EVD_Nonstructural_ecdf = ecdf(1 - (filter(EVD_Entropy, Region == "Nonstructural")$Value))
+
+EVA_Nonstructural_ecdf_auc = integrate(EVA_Nonstructural_ecdf, 0, 1, subdivisions = 1000)
+EVB_Nonstructural_ecdf_auc = integrate(EVB_Nonstructural_ecdf, 0, 1, subdivisions = 1000)
+EVC_Nonstructural_ecdf_auc = integrate(EVC_Nonstructural_ecdf, 0, 1, subdivisions = 1000)
+EVD_Nonstructural_ecdf_auc = integrate(EVD_Nonstructural_ecdf, 0, 1, subdivisions = 1000)
+
+Species <- c("EVA", "EVB", "EVC", "EVD")
+AUC <- c(EVA_Nonstructural_ecdf_auc[[1]], EVB_Nonstructural_ecdf_auc[[1]], EVC_Nonstructural_ecdf_auc[[1]], EVD_Nonstructural_ecdf_auc[[1]])
+Abs_Error <- c(EVA_Nonstructural_ecdf_auc[[2]], EVB_Nonstructural_ecdf_auc[[2]], EVC_Nonstructural_ecdf_auc[[2]], EVD_Nonstructural_ecdf_auc[[2]])
+
+EV_Nonstructural_ecdf_auc = as.data.frame(cbind(Species, as.numeric(AUC), as.numeric(Abs_Error)))
+
+ks.test(1 - (filter(EVA_Entropy, Region == "Nonstructural")$Value), 1 - (filter(EVB_Entropy, Region == "Nonstructural")$Value))
+ks.test(1 - (filter(EVA_Entropy, Region == "Nonstructural")$Value), 1 - (filter(EVC_Entropy, Region == "Nonstructural")$Value))
+ks.test(1 - (filter(EVA_Entropy, Region == "Nonstructural")$Value), 1 - (filter(EVD_Entropy, Region == "Nonstructural")$Value))
+ks.test(1 - (filter(EVB_Entropy, Region == "Nonstructural")$Value), 1 - (filter(EVC_Entropy, Region == "Nonstructural")$Value))
+ks.test(1 - (filter(EVB_Entropy, Region == "Nonstructural")$Value), 1 - (filter(EVD_Entropy, Region == "Nonstructural")$Value))
+ks.test(1 - (filter(EVC_Entropy, Region == "Nonstructural")$Value), 1 - (filter(EVD_Entropy, Region == "Nonstructural")$Value))
+
+pdf("Whole_Species_Entropies_Nonstructural_AUC.pdf", height = 3.5, width = 3.5)
+
+ggplot(EV_Nonstructural_ecdf_auc, aes(x = Species, y = AUC, fill = Species, color = Species)) +
+  geom_bar(stat = "identity", linewidth = 2) +
+  geom_errorbar(aes(x = Species, ymin = AUC - Abs_Error, ymax = AUC + Abs_Error)) +
+  theme_prism() +
+  scale_fill_manual(values = c("#00008B99", "#FF149399", "#DAA52099", "#06402B99")) +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  ylim(0, 0.1) +
+  theme(legend.position = "none")
+
+dev.off()
+```
+
+#Entropy Comparison - Type Level
+
+```{r}
+All_Entropy_Values = rbind(EVA_Entropy, EVB_Entropy, EVC_Entropy, EVD_Entropy)
+
+Type_Entropies = All_Entropy_Values %>%
+  filter(Metric == "Type Entropy")
+
+Type_Entropy_Summary = Type_Entropies %>%
+  group_by(Species) %>%
+  summarise(Mean_Type_Entropy = mean(Value), SE_Type_Entropy = sd(Value)/sqrt(n()))
+```
+
+Structural
+```{r}
+Type_Entropies_Structural = Type_Entropies %>%
+  filter(Region == "Structural")
+
+Type_Entropy_Structural_Summary = Type_Entropies_Structural %>%
+  group_by(Species) %>%
+  summarise(Mean_Type_Structural_Entropy = mean(Value), SE_Type_Structural_Entropy = sd(Value)/sqrt(n()))
+```
+
+Nonstructural
+```{r}
+Type_Entropies_Nonstructural = Type_Entropies %>%
+  filter(Region == "Nonstructural")
+
+Type_Entropy_Nonstructural_Summary = Type_Entropies_Nonstructural %>%
+  group_by(Species) %>%
+  summarise(Mean_Type_Nonstructural_Entropy = mean(Value), SE_Type_Nonstructural_Entropy = sd(Value)/sqrt(n()))
+```
+
+By individual type
+```{r}
+EVA_Type_Entropy_Comparisons = read_csv("Enterovirus_A/All_EVA_Type_Shannon_Entropy_Region_Comparison.csv") %>%
+  mutate(Species = "EVA")
+
+EVB_Type_Entropy_Comparisons = read_csv("Enterovirus_B/All_EVB_Type_Shannon_Entropy_Region_Comparison.csv") %>%
+  mutate(Species = "EVB")
+
+EVC_Type_Entropy_Comparisons = read_csv("Enterovirus_C/All_EVC_Type_Shannon_Entropy_Region_Comparison.csv") %>%
+  mutate(Species = "EVC")
+
+EVD_Type_Entropy_Comparisons = read_csv("Enterovirus_D/EVD68_Shannon_Entropy_Region_Comparison.csv") %>%
+  mutate(Species = "EVD")
+
+EV_Type_Entropy_Comparsions = rbind(EVA_Type_Entropy_Comparisons, EVB_Type_Entropy_Comparisons, EVC_Type_Entropy_Comparisons, EVD_Type_Entropy_Comparisons)
+```
+
+```{r}
+EV_Type_Entropy_Comparsions %>%
+  dplyr::rename(`P-value` = p.adj, Significance = p.adj.signif) %>%
+  filter(Species != "EVB") %>%
+  select(Type, Structural, Nonstructural, `P-value`, Significance) %>%
+  mutate(Structural = round(Structural, digits = 4)) %>%
+  mutate(Nonstructural = round(Nonstructural, digits = 4)) %>%
+  gt() %>%
+  tab_spanner(label = md("**Entropy**"), columns = c(Structural, Nonstructural)) %>%
+  tab_row_group(label = md("***Enterovirus D***"), rows = 11) %>%
+  tab_row_group(label = md("***Enterovirus C***"), rows = 7:10) %>%
+  tab_row_group(label = md("***Enterovirus A***"), rows = 1:6) %>%
+  data_color(columns = Type, target_columns = everything(), palette = c("lightgrey", "black", "lightgrey", "lightgrey", "black", "lightgrey", "lightgrey", "white", "lightgrey", "lightgrey", "lightgrey"), alpha = 0.5) %>%
+  cols_align(align = "center") %>%
+  cols_align(align = "left", columns = Type) %>%
+  tab_options(table.width = "650px") %>%
+  gtsave("EVACD_Type_Entropy_Comparsion_Table.png")
+
+EV_Type_Entropy_Comparsions %>%
+  dplyr::rename(`P-value` = p.adj, Significance = p.adj.signif) %>%
+  filter(Species == "EVB") %>%
+  select(Type, Structural, Nonstructural, `P-value`, Significance) %>%
+  mutate(Structural = round(Structural, digits = 4)) %>%
+  mutate(Nonstructural = round(Nonstructural, digits = 4)) %>%
+  gt() %>%
+  tab_spanner(label = md("**Entropy**"), columns = c(Structural, Nonstructural)) %>%
+  tab_row_group(label = md("***Enterovirus B***"), rows = 1:12) %>%
+  data_color(columns = Type, target_columns = everything(), palette = c("lightgrey", "lightgrey", "lightgrey", "lightgrey", "lightgrey", "black", "lightgrey", "lightgrey", "black", "lightgrey", "lightgrey", "lightgrey"), alpha = 0.5) %>%
+  cols_align(align = "center") %>%
+  cols_align(align = "left", columns = Type) %>%
+  tab_options(table.width = "650px") %>%
+  gtsave("EVB_Type_Entropy_Comparsion_Table.png")
+```
+
+#Similarity/Hamming Distance Summaries
+
+Whole genome
+```{r}
+EVA_Hamming_Distances = read_csv("Enterovirus_A/EVA_Hamming_Distances.csv") %>%
+  mutate(Species = "EVA")
+
+EVB_Hamming_Distances = read_csv("Enterovirus_B/EVB_Hamming_Distances.csv") %>%
+  mutate(Species = "EVB")
+
+EVC_Hamming_Distances = read_csv("Enterovirus_C/EVC_Hamming_Distances.csv") %>%
+  mutate(Species = "EVC")
+
+EVD_Hamming_Distances = read_csv("Enterovirus_D/EVD_Hamming_Distances.csv") %>%
+  mutate(Species = "EVD")
+
+EV_Hamming_Distances = rbind(EVA_Hamming_Distances, EVB_Hamming_Distances, EVC_Hamming_Distances, EVD_Hamming_Distances)
+```
+
+```{r}
+EV_Hamming_Distances_Summary = EV_Hamming_Distances %>%
+  group_by(Species) %>%
+  summarise(Mean_Distance = mean(Hamming_Distance), SE_Distance = sd(Hamming_Distance)/sqrt(n()))
+
+EV_Hamming_Distances_Summary_betweenTypes = EV_Hamming_Distances %>%
+  filter(Comparison == "Between types") %>%
+  group_by(Species) %>%
+  summarise(Mean_Distance = mean(Hamming_Distance), SE_Distance = sd(Hamming_Distance)/sqrt(n()))
+
+EV_Hamming_Distances_Summary_withinTypes = EV_Hamming_Distances %>%
+  filter(Comparison == "Within type") %>%
+  group_by(Species) %>%
+  summarise(Mean_Distance = mean(Hamming_Distance), SE_Distance = sd(Hamming_Distance)/sqrt(n()))
+
+EV_Hamming_Distances$Species <- factor(EV_Hamming_Distances$Species, levels = c("EVD", "EVC", "EVB", "EVA"))
+
+#pdf("Hamming_Distance_Comparison.pdf", height = 4, width = 8)
+
+ggplot(EV_Hamming_Distances, aes(x = Species, y = Hamming_Distance, fill = Species)) +
+  stat_halfeye(aes(alpha = Comparison), adjust = 0.5, justification = -0.2, .width = 0, point_colour = NA, fill_type = "segments") +
+  geom_boxplot(width = 0.12, alpha = 0.66, outlier.color = NA) +
+  theme_prism() +
+  xlab("Enterovirus Species") +
+  ylab("Distance") +
+  scale_fill_manual(values = c("darkgreen", "goldenrod", "deeppink", "darkblue")) +
+  scale_alpha_manual(values = c(1, 0.33)) +
+  theme(legend.position = "none") +
+  coord_flip() 
+
+#dev.off()
+```
+
+Between vs. Within type similarity
+```{r}
+EV_Similarity_Comparisons = EV_Hamming_Distances %>%
+  group_by(Comparison) %>%
+  dunn_test(Hamming_Distance ~ Species) %>%
+  filter(p.adj.signif != "ns") %>%
+  add_xy_position() %>%
+  select(-y.position) %>%
+  cbind(y.position = c(1.05, 1.08, 1.11, 1.14, 1.17, 1.20))
+
+#pdf("EV_Hamming_Distances_withinBetween_Types.pdf", height = 3.5, width = 8)
+
+ggviolin(EV_Hamming_Distances, x = "Species", y = "Hamming_Distance", fill = "Species", color = "black", alpha = "Comparison", add = "boxplot", add.params = list(fill = "white", width = 0.05)) +
+  stat_compare_means(label.y = 1.25) +
+  stat_pvalue_manual(EV_Similarity_Comparisons, label = "p.adj.signif") +
+  theme_prism() +
+  xlab("Enterovirus Species") +
+  ylab("Similarity") +
+  scale_fill_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  scale_alpha_manual(values = c(1, 0.33)) +
+  theme(legend.position = "none") +
+  facet_wrap(~Comparison)
+
+#dev.off()
+```
+
+#Regional similarities - Between types
+```{r}
+EVA_Region_Distances_Combined = read_csv("Enterovirus_A/EVA_Region_Distances_Combined.csv")
+EVB_Region_Distances_Combined = read_csv("Enterovirus_B/EVB_Region_Distances_Combined.csv")
+EVC_Region_Distances_Combined = read_csv("Enterovirus_C/EVC_Region_Distances_Combined.csv")
+EVD_Region_Distances_Combined = read_csv("Enterovirus_D/EVD_Region_Distances_Combined.csv")
+
+Enterovirus_Region_Distances_Combined = rbind(EVA_Region_Distances_Combined, EVB_Region_Distances_Combined, EVC_Region_Distances_Combined, EVD_Region_Distances_Combined)
+```
+
+Structural
+```{r}
+Enterovirus_betweenStructural_Distances_Combined = Enterovirus_Region_Distances_Combined %>%
+  filter(Region == "Structural") %>%
+  filter(Comparison == "Between types")
+
+Enterovirus_betweenStructural_Distances_Combined_Comparisons = dunn_test(Distance ~ Species, data = Enterovirus_betweenStructural_Distances_Combined) %>%
+  filter(p.adj.signif != "ns") %>%
+  add_xy_position() %>%
+  select(-y.position) %>%
+  cbind(y.position = c(0.45, 0.47, 0.49, 0.51, 0.53, 0.55))
+
+Enterovirus_betweenStructural_Distances_Combined_Summary = Enterovirus_betweenStructural_Distances_Combined %>%
+  group_by(Species) %>%
+  summarise(Mean_Structural_Distance = mean(Distance), SE_Structural_Distance = sd(Distance)/sqrt(n()))
+
+pdf("Enterovirus_betweenStructural_Distances_Combined.pdf", height = 3.5, width = 7.5)
+
+ggviolin(Enterovirus_betweenStructural_Distances_Combined, x = "Species", y = "Distance", fill = "Species", color = "black", add = "boxplot", add.params = list(fill = "white", width = 0.05)) +
+  stat_compare_means(label.y = 0.6) +
+  stat_pvalue_manual(Enterovirus_betweenStructural_Distances_Combined_Comparisons, label = "p.adj.signif") +
+  theme_prism() +
+  xlab("Enterovirus Species") +
+  ylab("Distance") +
+  ggtitle("Structural Proteins") +
+  scale_fill_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  theme(legend.position = "none")
+
+dev.off()
+```
+
+Nonstructural
+```{r}
+Enterovirus_betweenNonstructural_Distances_Combined = Enterovirus_Region_Distances_Combined %>%
+  filter(Region == "Nonstructural") %>%
+  filter(Comparison == "Between types")
+
+Enterovirus_betweenNonstructural_Distances_Combined_Comparisons = dunn_test(Distance ~ Species, data = Enterovirus_betweenNonstructural_Distances_Combined) %>%
+  filter(p.adj.signif != "ns") %>%
+  add_xy_position() %>%
+  select(-y.position) %>%
+  cbind(y.position = c(0.45, 0.47, 0.49, 0.51, 0.53, 0.55))
+
+Enterovirus_betweenNonstructural_Distances_Combined_Summary = Enterovirus_betweenNonstructural_Distances_Combined %>%
+  group_by(Species) %>%
+  summarise(Mean_Nonstructural_Distance = mean(Distance), SE_Nonstructural_Distance = sd(Distance)/sqrt(n()))
+
+pdf("Enterovirus_betweenNonstructural_Distances_Combined.pdf", height = 3.5, width = 7)
+
+ggviolin(Enterovirus_betweenNonstructural_Distances_Combined, x = "Species", y = "Distance", fill = "Species", color = "black", add = "boxplot", add.params = list(fill = "white", width = 0.05)) +
+  stat_compare_means(label.y = 0.6) +
+  stat_pvalue_manual(Enterovirus_betweenNonstructural_Distances_Combined_Comparisons, label = "p.adj.signif") +
+  theme_prism() +
+  xlab("Enterovirus Species") +
+  ylab("Distance") +
+  ggtitle("Nonstructural Proteins") +
+  scale_fill_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  theme(legend.position = "none")
+
+dev.off()
+```
+
+Within vs. Between Type Diversity
+```{r}
+Overall_EV_Species_Distances = Enterovirus_Region_Distances_Combined %>%
+  group_by(Species, Region) %>%
+  summarise(Mean_Distance = mean(Distance), Max_Distance = max(Distance))
+
+Enterovirus_Region_Distances_Comparison = Enterovirus_Region_Distances_Combined %>%
+  group_by(Species, Region, Comparison) %>%
+  summarise(Mean_Distance = mean(Distance)) 
+
+Enterovirus_Region_Distances_SE_Comparison = Enterovirus_Region_Distances_Combined %>%
+  group_by(Species, Region, Comparison) %>%
+  summarise(SD_Distance = sd(Distance))
+
+Enterovirus_Region_Distances_Comparison_Spread = Enterovirus_Region_Distances_Comparison %>%
+  spread(key = Comparison, value = Mean_Distance) %>%
+  full_join(Overall_EV_Species_Distances, join_by("Species", "Region")) %>%
+  mutate(Fst = (`Between types` - `Within type`)/`Between types`) %>%
+  mutate(WithinVSOverall = `Within type`/Mean_Distance)
+
+EV_Fst_Table = Enterovirus_Region_Distances_Comparison_Spread %>%
+  select(Species, Region, Fst) %>%
+  mutate(Fst = round(Fst, 3)) %>%
+  spread(key = Region, value = Fst) %>%
+  select(Species, Structural, Nonstructural) %>%
+  ungroup()
+
+EV_Fst_Summary = EV_Fst_Table %>%
+  dplyr::rename(Fst_Structural = Structural) %>%
+  dplyr::rename(Fst_Nonstructural = Nonstructural)
+
+EV_Fst_Table %>%
+  gt() %>%
+  tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels()) %>%
+  tab_spanner(label = md("***F<sub><small>ST<small><sub>***"), columns = c(Structural, Nonstructural)) %>%
+  tab_options(table.width = "400px") %>%
+  gtsave("EV_Fst_Table.png")
+```
+
+#Network Summaries
+```{r}
+EVA_Network_Connectivity = read_csv("Enterovirus_A/Clustering_0.95/P1_P2_P3/EVA_Network_Statistics.csv") %>%
+  select(Region, NeighborhoodConnectivity, Degree, BetweennessCentrality) %>%
+  mutate(Species = "EVA")
+
+EVB_Network_Connectivity = read_csv("Enterovirus_B/Clustering_0.95/P1_P2_P3/EVB_Network_Statistics.csv") %>%
+  select(Region, NeighborhoodConnectivity, Degree, BetweennessCentrality) %>%
+  mutate(Species = "EVB")
+
+EVC_Network_Connectivity = read_csv("Enterovirus_C/Clustering_0.95/P1_P2_P3/EVC_Network_Statistics.csv") %>%
+  select(Region, NeighborhoodConnectivity, Degree, BetweennessCentrality) %>%
+  mutate(Species = "EVC")
+
+EVC_wVaccine_Network_Connectivity = read_csv("Enterovirus_C/Clustering_0.95/P1_P2_P3/EVC_wVaccine_Network_Statistics.csv") %>%
+  select(Region, NeighborhoodConnectivity, Degree, BetweennessCentrality) %>%
+  mutate(Species = "EVC\nw/vaccine sequences")
+
+EVD_Network_Connectivity = read_csv("Enterovirus_D/Clustering_0.95/P1_P2_P3/EVD_Network_Statistics.csv") %>%
+  select(Region, NeighborhoodConnectivity, Degree, BetweennessCentrality) %>%
+  mutate(Species = "EVD")
+
+EV_Network_Connectivity = rbind(EVA_Network_Connectivity, EVB_Network_Connectivity, EVC_Network_Connectivity, EVD_Network_Connectivity)
+
+EV_Network_Connectivity_EVCwVaccine = rbind(EVA_Network_Connectivity, EVB_Network_Connectivity, EVC_wVaccine_Network_Connectivity, EVD_Network_Connectivity)
+```
+
+```{r}
+EV_Network_Summary = EV_Network_Connectivity %>%
+  group_by(Species) %>%
+  summarise(Mean_Connectivity = mean(NeighborhoodConnectivity), SE_Connectivity = sd(NeighborhoodConnectivity)/sqrt(n()), Mean_Degree = mean(Degree), SE_Degree = sd(Degree)/sqrt(n()), Mean_Betweenness = mean(BetweennessCentrality), SE_Betweenness = sd(BetweennessCentrality)/sqrt(n()))
+
+EV_Network_Connectivity_Comparisons = dunn_test(NeighborhoodConnectivity ~ Species, data = EV_Network_Connectivity) %>%
+  filter(p.adj.signif != "ns") %>%
+  add_xy_position() %>%
+  select(-y.position) %>%
+  cbind(y.position = c(26, 27, 28, 29, 30))
+
+pdf("EV_Neighborhood_Connectivity_Comparison_Narrow.pdf", height = 4, width = 5)
+#png("EV_Neighborhood_Connectivity_Comparison.png", height = 1200, width = 1600, res = 300)
+
+ggplot(EV_Network_Connectivity, aes(x = Species, y = NeighborhoodConnectivity, color = Species)) +
+  geom_boxplot(aes(fill = Species, fill = after_scale(colorspace::lighten(fill, .7))), size = 1, outlier.shape = NA) +
+  geom_jitter(shape=16, width = .25, size = 2, alpha = .5) +
+  stat_compare_means(label.y = 33) +
+  stat_pvalue_manual(EV_Network_Connectivity_Comparisons, label = "p.adj.signif") +
+  theme_prism() +
+  ylab("Neighborhood Connectivity") +
+  scale_fill_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") 
+
+dev.off()
+```
+
+EVC w/vaccine
+```{r}
+EV_Network_Summary_EVCwVaccine = EV_Network_Connectivity_EVCwVaccine %>%
+  group_by(Species) %>%
+  summarise(Mean_Connectivity = mean(NeighborhoodConnectivity), SE_Connectivity = sd(NeighborhoodConnectivity)/sqrt(n()), Mean_Degree = mean(Degree), SE_Degree = sd(Degree)/sqrt(n()), Mean_Betweenness = mean(BetweennessCentrality), SE_Betweenness = sd(BetweennessCentrality)/sqrt(n()))
+
+EV_Network_Connectivity_EVCwVaccine_Comparisons = dunn_test(NeighborhoodConnectivity ~ Species, data = EV_Network_Connectivity_EVCwVaccine) %>%
+  filter(p.adj.signif != "ns") %>%
+  add_xy_position() %>%
+  select(-y.position) %>%
+  cbind(y.position = c(26, 27, 28))
+
+pdf("EV_Neighborhood_Connectivity_EVCwVaccine_Comparison.pdf", height = 4, width = 10)
+#png("EV_Neighborhood_Connectivity_Comparison.png", height = 1200, width = 1600, res = 300)
+
+ggplot(EV_Network_Connectivity_EVCwVaccine, aes(x = Species, y = NeighborhoodConnectivity, color = Species)) +
+  geom_boxplot(aes(fill = Species, fill = after_scale(colorspace::lighten(fill, .7))), size = 1, outlier.shape = NA) +
+  geom_jitter(shape=16, width = .25, size = 2, alpha = .5) +
+  stat_compare_means() +
+  stat_pvalue_manual(EV_Network_Connectivity_EVCwVaccine_Comparisons, label = "p.adj.signif") +
+  theme_prism() +
+  ylab("Neighborhood Connectivity") +
+  scale_fill_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") 
+
+dev.off()
+```
+
+#TreeOrderScan Results
+```{r}
+EVA_TOS_ViolationList =  read_tsv("Enterovirus_A/Clustering_0.95/Clustering_0.98/Enterovirus_A.Violation_List.DAT") %>%
+  mutate(Species = "EVA")
+
+EVB_TOS_ViolationList =  read_tsv("Enterovirus_B/Clustering_0.95/Clustering_0.98/Enterovirus_B.Violation_List.DAT") %>%
+  mutate(Species = "EVB")
+
+EVC_TOS_ViolationList =  read_tsv("Enterovirus_C/Clustering_0.95/Clustering_0.98/Enterovirus_C.Violation_List.DAT") %>%
+  mutate(Species = "EVC")
+
+EVD_TOS_ViolationList =  read_tsv("Enterovirus_D/Clustering_0.95/Clustering_0.98/Enterovirus_D.Violation_List.DAT") %>%
+  mutate(Species = "EVD")
+
+EV_TOS_ViolationLists = rbind(EVA_TOS_ViolationList, EVB_TOS_ViolationList, EVC_TOS_ViolationList, EVD_TOS_ViolationList)
+```
+
+50 sequence subsample
+```{r}
+EVA_TOS_ViolationList =  read_tsv("Enterovirus_A/Clustering_0.95/Enterovirus_A.Violation_List.DAT") %>%
+  mutate(Species = "EVA")
+
+EVB_TOS_ViolationList =  read_tsv("Enterovirus_B/Clustering_0.95/Enterovirus_B.Violation_List.DAT") %>%
+  mutate(Species = "EVB")
+
+EVC_TOS_ViolationList =  read_tsv("Enterovirus_C/Clustering_0.95/Enterovirus_C.Violation_List.DAT") %>%
+  mutate(Species = "EVC")
+
+EVD_TOS_ViolationList =  read_tsv("Enterovirus_D/Clustering_0.95/Enterovirus_D.Violation_List.DAT") %>%
+  mutate(Species = "EVD")
+
+EV_TOS_ViolationLists = rbind(EVA_TOS_ViolationList, EVB_TOS_ViolationList, EVC_TOS_ViolationList, EVD_TOS_ViolationList)
+```
+
+```{r}
+EV_TOS_ViolationLists_Summary = EV_TOS_ViolationLists %>%
+  group_by(Species) %>%
+  summarise(Mean_AGViolationsPerClade = mean(`AG/clade`), SE_AGViolationsPerClade = sd(`AG/clade`)/sqrt(n()), Mean_BGViolationsPerClade = mean(`BG/clade`), SE_BGViolationsPerClade = sd(`BG/clade`)/sqrt(n()), Mean_WGViolationsPerClade = mean(`WG/clade`), SE_WGViolationsPerClade = sd(`WG/clade`)/sqrt(n()))
+
+EV_TOS_ViolationLists_AG_Comparisons = dunn_test(`AG/clade` ~ Species, data = EV_TOS_ViolationLists) %>%
+  filter(p.adj.signif != "ns") %>%
+  add_xy_position() %>%
+  select(-y.position) %>%
+  cbind(y.position = c(4, 4.2, 4.4, 4.6, 4.8, 5))
+
+pdf("EV_TOS_ViolationLists_AG_Comparison.pdf", height = 4, width = 10)
+#png("EV_TOS_ViolationLists_AG_Comparison.png", height = 1200, width = 1600, res = 300)
+
+ggplot(EV_TOS_ViolationLists, aes(x = Species, y = `AG/clade`, color = Species)) +
+  geom_boxplot(aes(fill = Species, fill = after_scale(colorspace::lighten(fill, .7))), size = 1, outlier.shape = NA) +
+  geom_jitter(shape=16, width = .25, size = 1.5, alpha = .1) +
+  #geom_sina(maxwidth = .8, scale = "count", size = 1.5, alpha = .05, seed = 0) +
+  stat_compare_means() +
+  stat_pvalue_manual(EV_TOS_ViolationLists_AG_Comparisons, label = "p.adj.signif") +
+  theme_prism() +
+  ylab("AG Violations per Clade") +
+  scale_fill_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") 
+
+dev.off()
+
+EV_TOS_ViolationLists_BG_Comparisons = dunn_test(`BG/clade` ~ Species, data = EV_TOS_ViolationLists) %>%
+  filter(p.adj.signif != "ns") %>%
+  add_xy_position() %>%
+  select(-y.position) %>%
+  cbind(y.position = c(2, 2.1, 2.2, 2.3, 2.4, 2.5))
+
+pdf("EV_TOS_ViolationLists_BG_Comparison.pdf", height = 4, width = 10)
+#png("EV_TOS_ViolationLists_BG_Comparison.png", height = 1200, width = 1600, res = 300)
+
+ggplot(EV_TOS_ViolationLists, aes(x = Species, y = `BG/clade`, color = Species)) +
+  geom_boxplot(aes(fill = Species, fill = after_scale(colorspace::lighten(fill, .7))), size = 1, outlier.shape = NA) +
+  geom_jitter(shape=16, width = .25, size = 1.5, alpha = .1) +
+  #geom_sina(maxwidth = .8, scale = "count", size = 1.5, alpha = .05, seed = 0) +
+  stat_compare_means() +
+  stat_pvalue_manual(EV_TOS_ViolationLists_BG_Comparisons, label = "p.adj.signif") +
+  theme_prism() +
+  ylab("BG Violations per Clade") +
+  scale_fill_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") 
+
+dev.off()
+
+EV_TOS_ViolationLists_WG_Comparisons = dunn_test(`WG/clade` ~ Species, data = EV_TOS_ViolationLists) %>%
+  filter(p.adj.signif != "ns") %>%
+  add_xy_position() %>%
+  select(-y.position) %>%
+  cbind(y.position = c(0.6, 0.65, 0.7, 0.75, 0.8))
+
+pdf("EV_TOS_ViolationLists_WG_Comparison.pdf", height = 4, width = 10)
+#png("EV_TOS_ViolationLists_WG_Comparison.png", height = 1200, width = 1600, res = 300)
+
+ggplot(EV_TOS_ViolationLists, aes(x = Species, y = `WG/clade`, color = Species)) +
+  geom_boxplot(aes(fill = Species, fill = after_scale(colorspace::lighten(fill, .7))), size = 1, outlier.shape = NA) +
+  geom_jitter(shape=16, width = .25, size = 1.5, alpha = .1) +
+  #geom_sina(maxwidth = .8, scale = "count", size = 1.5, alpha = .05, seed = 0) +
+  stat_compare_means() +
+  stat_pvalue_manual(EV_TOS_ViolationLists_WG_Comparisons, label = "p.adj.signif") +
+  theme_prism() +
+  ylab("WG Violations per Clade") +
+  scale_fill_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") 
+
+dev.off()
+```
+
+#BEAST Results
+
+VP1
+```{r}
+EVA_BEAST_VP1_Log = read_tsv("Enterovirus_A/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined.log") %>%
+  select(All_Enterovirus_A_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.treeModel.rootHeight, `All_Enterovirus_A_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.age(root)`, All_Enterovirus_A_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.constant.popSize, All_Enterovirus_A_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.ucld.mean) %>%
+  mutate(Species = "EVA")
+colnames(EVA_BEAST_VP1_Log) <- c("treeModel.rootHeight", "age(root)", "constant.popSize", "ucld.mean", "Species")
+
+EVB_BEAST_VP1_Log = read_tsv("Enterovirus_B/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined.log") %>%
+  select(All_Enterovirus_B_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.treeModel.rootHeight, `All_Enterovirus_B_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.age(root)`, All_Enterovirus_B_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.constant.popSize, All_Enterovirus_B_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.ucld.mean) %>%
+  mutate(Species = "EVB")
+colnames(EVB_BEAST_VP1_Log) <- c("treeModel.rootHeight", "age(root)", "constant.popSize", "ucld.mean", "Species")
+
+EVC_BEAST_VP1_Log = read_tsv("Enterovirus_C/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined.log") %>%
+  select(All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.treeModel.rootHeight, `All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.age(root)`, All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.constant.popSize, All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.ucld.mean) %>%
+  mutate(Species = "EVC")
+colnames(EVC_BEAST_VP1_Log) <- c("treeModel.rootHeight", "age(root)", "constant.popSize", "ucld.mean", "Species")
+
+EVD_BEAST_VP1_Log = read_tsv("Enterovirus_D/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined.log") %>%
+  select(All_Enterovirus_D_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.treeModel.rootHeight, `All_Enterovirus_D_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.age(root)`, All_Enterovirus_D_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.constant.popSize, All_Enterovirus_D_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.ucld.mean) %>%
+  mutate(Species = "EVD")
+colnames(EVD_BEAST_VP1_Log) <- c("treeModel.rootHeight", "age(root)", "constant.popSize", "ucld.mean", "Species")
+
+EV_BEAST_VP1_Results = rbind(EVA_BEAST_VP1_Log, EVB_BEAST_VP1_Log, EVC_BEAST_VP1_Log, EVD_BEAST_VP1_Log)
+```
+
+VP1 - 95% HPD Age
+```{r}
+EVA_VP1_Age_HPD95 = HPDinterval(as.mcmc(EVA_BEAST_VP1_Log$treeModel.rootHeight), prob = 0.95)
+EVA_VP1_Age_Median = median(EVA_BEAST_VP1_Log$treeModel.rootHeight)
+EVA_VP1_Age_Mean = mean(EVA_BEAST_VP1_Log$treeModel.rootHeight)
+EVA_Age <- c("EVA", EVA_VP1_Age_HPD95[1], EVA_VP1_Age_HPD95[2], EVA_VP1_Age_Median, EVA_VP1_Age_Mean)
+
+EVB_VP1_Age_HPD95 = HPDinterval(as.mcmc(EVB_BEAST_VP1_Log$treeModel.rootHeight), prob = 0.95)
+EVB_VP1_Age_Median = median(EVB_BEAST_VP1_Log$treeModel.rootHeight)
+EVB_VP1_Age_Mean = mean(EVB_BEAST_VP1_Log$treeModel.rootHeight)
+EVB_Age <- c("EVB", EVB_VP1_Age_HPD95[1], EVB_VP1_Age_HPD95[2], EVB_VP1_Age_Median, EVB_VP1_Age_Mean)
+
+EVC_VP1_Age_HPD95 = HPDinterval(as.mcmc(EVC_BEAST_VP1_Log$treeModel.rootHeight), prob = 0.95)
+EVC_VP1_Age_Median = median(EVC_BEAST_VP1_Log$treeModel.rootHeight)
+EVC_VP1_Age_Mean = mean(EVC_BEAST_VP1_Log$treeModel.rootHeight)
+EVC_Age <- c("EVC", EVC_VP1_Age_HPD95[1], EVC_VP1_Age_HPD95[2], EVC_VP1_Age_Median, EVC_VP1_Age_Mean)
+
+EVD_VP1_Age_HPD95 = HPDinterval(as.mcmc(EVD_BEAST_VP1_Log$treeModel.rootHeight), prob = 0.95)
+EVD_VP1_Age_Median = median(EVD_BEAST_VP1_Log$treeModel.rootHeight)
+EVD_VP1_Age_Mean = mean(EVD_BEAST_VP1_Log$treeModel.rootHeight)
+EVD_Age <- c("EVD", EVD_VP1_Age_HPD95[1], EVD_VP1_Age_HPD95[2], EVD_VP1_Age_Median, EVC_VP1_Age_Mean)
+
+EV_VP1_Age = as.data.frame(rbind(EVA_Age, EVB_Age, EVC_Age, EVD_Age)) %>%
+  mutate(Protein = "VP1")
+colnames(EV_VP1_Age) <- c("Species", "Lower", "Upper", "Median", "Mean", "Protein")
+```
+
+VP1 - 95% HPD Clock Rate
+```{r}
+EVA_VP1_ClockRate_HPD95 = HPDinterval(as.mcmc(EVA_BEAST_VP1_Log$ucld.mean), prob = 0.95)
+EVA_VP1_ClockRate_Median = median(EVA_BEAST_VP1_Log$ucld.mean)
+EVA_VP1_ClockRate_Mean = mean(EVA_BEAST_VP1_Log$ucld.mean)
+EVA_ClockRate <- c("EVA", EVA_VP1_ClockRate_HPD95[1], EVA_VP1_ClockRate_HPD95[2], EVA_VP1_ClockRate_Median, EVA_VP1_ClockRate_Mean)
+
+EVB_VP1_ClockRate_HPD95 = HPDinterval(as.mcmc(EVB_BEAST_VP1_Log$ucld.mean), prob = 0.95)
+EVB_VP1_ClockRate_Median = median(EVB_BEAST_VP1_Log$ucld.mean)
+EVB_VP1_ClockRate_Mean = mean(EVB_BEAST_VP1_Log$ucld.mean)
+EVB_ClockRate <- c("EVB", EVB_VP1_ClockRate_HPD95[1], EVB_VP1_ClockRate_HPD95[2], EVB_VP1_ClockRate_Median, EVB_VP1_ClockRate_Mean)
+
+EVC_VP1_ClockRate_HPD95 = HPDinterval(as.mcmc(EVC_BEAST_VP1_Log$ucld.mean), prob = 0.95)
+EVC_VP1_ClockRate_Median = median(EVC_BEAST_VP1_Log$ucld.mean)
+EVC_VP1_ClockRate_Mean = mean(EVC_BEAST_VP1_Log$ucld.mean)
+EVC_ClockRate <- c("EVC", EVC_VP1_ClockRate_HPD95[1], EVC_VP1_ClockRate_HPD95[2], EVC_VP1_ClockRate_Median, EVC_VP1_ClockRate_Mean)
+
+EVD_VP1_ClockRate_HPD95 = HPDinterval(as.mcmc(EVD_BEAST_VP1_Log$ucld.mean), prob = 0.95)
+EVD_VP1_ClockRate_Median = median(EVD_BEAST_VP1_Log$ucld.mean)
+EVD_VP1_ClockRate_Mean = mean(EVD_BEAST_VP1_Log$ucld.mean)
+EVD_ClockRate <- c("EVD", EVD_VP1_ClockRate_HPD95[1], EVD_VP1_ClockRate_HPD95[2], EVD_VP1_ClockRate_Median, EVC_VP1_ClockRate_Mean)
+
+EV_VP1_ClockRate = as.data.frame(rbind(EVA_ClockRate, EVB_ClockRate, EVC_ClockRate, EVD_ClockRate)) %>%
+  mutate(Protein = "VP1")
+colnames(EV_VP1_ClockRate) <- c("Species", "Lower", "Upper", "Median", "Mean", "Protein")
+```
+
+VP1 - PoW Age Correction
+```{r}
+EVA_VP1_PoW = as.data.frame(read.beast.table("Enterovirus_A/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/VP1_PoW/PoWtransformed.mcc.trees")) %>%
+  arrange(-height_median) %>%
+  mutate(Species = "EVA") %>%
+  select(Species, `height_95%_HPD_MIN`, `height_95%_HPD_MAX`, height_median, height) %>%
+  slice_head(n = 1)
+
+EVB_VP1_PoW = as.data.frame(read.beast.table("Enterovirus_B/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/VP1_PoW/PoWtransformed.mcc.trees")) %>%
+  arrange(-height_median) %>%
+  mutate(Species = "EVB") %>%
+  select(Species, `height_95%_HPD_MIN`, `height_95%_HPD_MAX`, height_median, height) %>%
+  slice_head(n = 1)
+
+EVC_VP1_PoW = as.data.frame(read.beast.table("Enterovirus_C/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/VP1_PoW/PoWtransformed.mcc.trees")) %>%
+  arrange(-height_median) %>%
+  mutate(Species = "EVC") %>%
+  select(Species, `height_95%_HPD_MIN`, `height_95%_HPD_MAX`, height_median, height) %>%
+  slice_head(n = 1)
+
+EVD_VP1_PoW = as.data.frame(read.beast.table("Enterovirus_D/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/VP1_PoW/PoWtransformed.mcc.trees")) %>%
+  arrange(-height_median) %>%
+  mutate(Species = "EVD") %>%
+  select(Species, `height_95%_HPD_MIN`, `height_95%_HPD_MAX`, height_median, height) %>%
+  slice_head(n = 1)
+
+EV_VP1_PoW_Age = rbind(EVA_VP1_PoW, EVB_VP1_PoW, EVC_VP1_PoW, EVD_VP1_PoW) %>%
+  mutate(Protein = "VP1")
+colnames(EV_VP1_PoW_Age) <- c("Species", "Lower", "Upper", "Median", "Mean", "Protein")
+
+EV_VP1_PoW_Age_Summary = EV_VP1_PoW_Age %>%
+  mutate(Median_Age_VP1_PoW = Median) %>%
+  select(Species, Median_Age_VP1_PoW)
+```
+
+3D
+```{r}
+EVA_BEAST_3D_Log = read_tsv("Enterovirus_A/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined.log") %>%
+  select(All_Enterovirus_A_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.treeModel.rootHeight, `All_Enterovirus_A_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.age(root)`, All_Enterovirus_A_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.constant.popSize, All_Enterovirus_A_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.ucld.mean) %>%
+  mutate(Species = "EVA")
+colnames(EVA_BEAST_3D_Log) <- c("treeModel.rootHeight", "age(root)", "constant.popSize", "ucld.mean", "Species")
+
+EVB_BEAST_3D_Log = read_tsv("Enterovirus_B/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined.log") %>%
+  select(All_Enterovirus_B_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.treeModel.rootHeight, `All_Enterovirus_B_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.age(root)`, All_Enterovirus_B_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.constant.popSize, All_Enterovirus_B_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.ucld.mean) %>%
+  mutate(Species = "EVB")
+colnames(EVB_BEAST_3D_Log) <- c("treeModel.rootHeight", "age(root)", "constant.popSize", "ucld.mean", "Species")
+
+EVC_BEAST_3D_Log = read_tsv("Enterovirus_C/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined.log") %>%
+  select(All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.treeModel.rootHeight, `All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.age(root)`, All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.constant.popSize, All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.ucld.mean) %>%
+  mutate(Species = "EVC")
+colnames(EVC_BEAST_3D_Log) <- c("treeModel.rootHeight", "age(root)", "constant.popSize", "ucld.mean", "Species")
+
+EVD_BEAST_3D_Log = read_tsv("Enterovirus_D/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined.log") %>%
+  select(All_Enterovirus_D_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.treeModel.rootHeight, `All_Enterovirus_D_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.age(root)`, All_Enterovirus_D_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.constant.popSize, All_Enterovirus_D_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.ucld.mean) %>%
+  mutate(Species = "EVD")
+colnames(EVD_BEAST_3D_Log) <- c("treeModel.rootHeight", "age(root)", "constant.popSize", "ucld.mean", "Species")
+
+EV_BEAST_3D_Results = rbind(EVA_BEAST_3D_Log, EVB_BEAST_3D_Log, EVC_BEAST_3D_Log, EVD_BEAST_3D_Log)
+```
+
+3D - 95% HPD Age
+```{r}
+EVA_3D_Age_HPD95 = HPDinterval(as.mcmc(EVA_BEAST_3D_Log$treeModel.rootHeight), prob = 0.95)
+EVA_3D_Age_Median = median(EVA_BEAST_3D_Log$treeModel.rootHeight)
+EVA_3D_Age_Mean = mean(EVA_BEAST_3D_Log$treeModel.rootHeight)
+EVA_Age <- c("EVA", EVA_3D_Age_HPD95[1], EVA_3D_Age_HPD95[2], EVA_3D_Age_Median, EVA_3D_Age_Mean)
+
+EVB_3D_Age_HPD95 = HPDinterval(as.mcmc(EVB_BEAST_3D_Log$treeModel.rootHeight), prob = 0.95)
+EVB_3D_Age_Median = median(EVB_BEAST_3D_Log$treeModel.rootHeight)
+EVB_3D_Age_Mean = mean(EVB_BEAST_3D_Log$treeModel.rootHeight)
+EVB_Age <- c("EVB", EVB_3D_Age_HPD95[1], EVB_3D_Age_HPD95[2], EVB_3D_Age_Median, EVB_3D_Age_Mean)
+
+EVC_3D_Age_HPD95 = HPDinterval(as.mcmc(EVC_BEAST_3D_Log$treeModel.rootHeight), prob = 0.95)
+EVC_3D_Age_Median = median(EVC_BEAST_3D_Log$treeModel.rootHeight)
+EVC_3D_Age_Mean = mean(EVC_BEAST_3D_Log$treeModel.rootHeight)
+EVC_Age <- c("EVC", EVC_3D_Age_HPD95[1], EVC_3D_Age_HPD95[2], EVC_3D_Age_Median, EVC_3D_Age_Mean)
+
+EVD_3D_Age_HPD95 = HPDinterval(as.mcmc(EVD_BEAST_3D_Log$treeModel.rootHeight), prob = 0.95)
+EVD_3D_Age_Median = median(EVD_BEAST_3D_Log$treeModel.rootHeight)
+EVD_3D_Age_Mean = mean(EVD_BEAST_3D_Log$treeModel.rootHeight)
+EVD_Age <- c("EVD", EVD_3D_Age_HPD95[1], EVD_3D_Age_HPD95[2], EVD_3D_Age_Median, EVD_3D_Age_Mean)
+
+EV_3D_Age = as.data.frame(rbind(EVA_Age, EVB_Age, EVC_Age, EVD_Age)) %>%
+  mutate(Protein = "3D")
+colnames(EV_3D_Age) <- c("Species", "Lower", "Upper", "Median", "Mean", "Protein")
+```
+
+3D - 95% HPD Clock Rate
+```{r}
+EVA_3D_ClockRate_HPD95 = HPDinterval(as.mcmc(EVA_BEAST_3D_Log$ucld.mean), prob = 0.95)
+EVA_3D_ClockRate_Median = median(EVA_BEAST_3D_Log$ucld.mean)
+EVA_3D_ClockRate_Mean = mean(EVA_BEAST_3D_Log$ucld.mean)
+EVA_ClockRate <- c("EVA", EVA_3D_ClockRate_HPD95[1], EVA_3D_ClockRate_HPD95[2], EVA_3D_ClockRate_Median, EVA_3D_ClockRate_Mean)
+
+EVB_3D_ClockRate_HPD95 = HPDinterval(as.mcmc(EVB_BEAST_3D_Log$ucld.mean), prob = 0.95)
+EVB_3D_ClockRate_Median = median(EVB_BEAST_3D_Log$ucld.mean)
+EVB_3D_ClockRate_Mean = mean(EVB_BEAST_3D_Log$ucld.mean)
+EVB_ClockRate <- c("EVB", EVB_3D_ClockRate_HPD95[1], EVB_3D_ClockRate_HPD95[2], EVB_3D_ClockRate_Median, EVB_3D_ClockRate_Mean)
+
+EVC_3D_ClockRate_HPD95 = HPDinterval(as.mcmc(EVC_BEAST_3D_Log$ucld.mean), prob = 0.95)
+EVC_3D_ClockRate_Median = median(EVC_BEAST_3D_Log$ucld.mean)
+EVC_3D_ClockRate_Mean = mean(EVC_BEAST_3D_Log$ucld.mean)
+EVC_ClockRate <- c("EVC", EVC_3D_ClockRate_HPD95[1], EVC_3D_ClockRate_HPD95[2], EVC_3D_ClockRate_Median, EVC_3D_ClockRate_Mean)
+
+EVD_3D_ClockRate_HPD95 = HPDinterval(as.mcmc(EVD_BEAST_3D_Log$ucld.mean), prob = 0.95)
+EVD_3D_ClockRate_Median = median(EVD_BEAST_3D_Log$ucld.mean)
+EVD_3D_ClockRate_Mean = mean(EVD_BEAST_3D_Log$ucld.mean)
+EVD_ClockRate <- c("EVD", EVD_3D_ClockRate_HPD95[1], EVD_3D_ClockRate_HPD95[2], EVD_3D_ClockRate_Median, EVD_3D_ClockRate_Mean)
+
+EV_3D_ClockRate = as.data.frame(rbind(EVA_ClockRate, EVB_ClockRate, EVC_ClockRate, EVD_ClockRate)) %>%
+  mutate(Protein = "3D")
+colnames(EV_3D_ClockRate) <- c("Species", "Lower", "Upper", "Median", "Mean", "Protein")
+```
+
+3D - PoW Age Correction
+```{r}
+EVA_3D_PoW = as.data.frame(read.beast.table("Enterovirus_A/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/3D_PoW/PoWtransformed.mcc.trees")) %>%
+  arrange(-height_median) %>%
+  mutate(Species = "EVA") %>%
+  select(Species, `height_95%_HPD_MIN`, `height_95%_HPD_MAX`, height_median, height) %>%
+  slice_head(n = 1)
+
+EVB_3D_PoW = as.data.frame(read.beast.table("Enterovirus_B/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/3D_PoW/PoWtransformed.mcc.trees")) %>%
+  arrange(-height_median) %>%
+  mutate(Species = "EVB") %>%
+  select(Species, `height_95%_HPD_MIN`, `height_95%_HPD_MAX`, height_median, height) %>%
+  slice_head(n = 1)
+
+EVC_3D_PoW = as.data.frame(read.beast.table("Enterovirus_C/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/3D_PoW/PoWtransformed.mcc.trees")) %>%
+  arrange(-height_median) %>%
+  mutate(Species = "EVC") %>%
+  select(Species, `height_95%_HPD_MIN`, `height_95%_HPD_MAX`, height_median, height) %>%
+  slice_head(n = 1)
+
+EVD_3D_PoW = as.data.frame(read.beast.table("Enterovirus_D/Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/3D_PoW/PoWtransformed.mcc.trees")) %>%
+  arrange(-height_median) %>%
+  mutate(Species = "EVD") %>%
+  select(Species, `height_95%_HPD_MIN`, `height_95%_HPD_MAX`, height_median, height) %>%
+  slice_head(n = 1)
+
+EV_3D_PoW_Age = rbind(EVA_3D_PoW, EVB_3D_PoW, EVC_3D_PoW, EVD_3D_PoW) %>%
+  mutate(Protein = "3D")
+colnames(EV_3D_PoW_Age) <- c("Species", "Lower", "Upper", "Median", "Mean", "Protein")
+
+EV_3D_PoW_Age_Summary = EV_3D_PoW_Age %>%
+  mutate(Median_Age_3D_PoW = Median) %>%
+  select(Species, Median_Age_3D_PoW)
+```
+
+Root Age Timeline - PoW Model
+```{r}
+EVA_Curated_Dates = read_tsv("Enterovirus_A/Clustering_0.95/Clustering_0.98/3D_tMRCA/Curated_EVA_3D_Sequence_Info_Complete_Dates.tsv") %>%
+  mutate(Species = "EVA")
+
+EVB_Curated_Dates = read_tsv("Enterovirus_B/Clustering_0.95/Clustering_0.98/3D_tMRCA/Curated_EVB_3D_Sequence_Info_Complete_Dates.tsv") %>%
+  mutate(Species = "EVB")
+
+EVC_Curated_Dates = read_tsv("Enterovirus_C/Clustering_0.95/Clustering_0.98/3D_tMRCA/Curated_EVC_3D_Sequence_Info_Complete_Dates.tsv") %>%
+  mutate(Species = "EVC")
+
+EVD_Curated_Dates = read_tsv("Enterovirus_D/Clustering_0.95/Clustering_0.98/3D_tMRCA/Curated_EVD_3D_Sequence_Info_Complete_Dates.tsv") %>%
+  mutate(Species = "EVD")
+
+EV_Most_Recent_Sample = rbind(EVA_Curated_Dates, EVB_Curated_Dates, EVC_Curated_Dates, EVD_Curated_Dates) %>%
+  group_by(Species) %>%
+  top_n(n = 1, wt = BEAST_Date) %>%
+  mutate(Most_Recent_Sample_Date = BEAST_Date) %>%
+  select(Species, Most_Recent_Sample_Date)
+
+EV_Oldest_Sample = rbind(EVA_Curated_Dates, EVB_Curated_Dates, EVC_Curated_Dates, EVD_3D_Curated_Dates) %>%
+  group_by(Species) %>%
+  top_n(n = -1, wt = BEAST_Date) %>%
+  mutate(Oldest_Sample_Date = BEAST_Date) %>%
+  select(Species, Oldest_Sample_Date)
+```
+
+```{r}
+EV_BEAST_Age = rbind(EV_VP1_Age, EV_3D_Age) %>%
+  mutate(Approach = "BEAST")
+EV_PoW_Age = rbind(EV_VP1_PoW_Age, EV_3D_PoW_Age) %>%
+  mutate(Approach = "BEAST w/ PoW")
+EV_Age = rbind(EV_BEAST_Age, EV_PoW_Age) %>%
+  mutate(Metric = "Age")
+
+EV_Age$Protein = factor(EV_Age$Protein , levels = c("VP1", "3D"))
+
+EV_PoW_Age_Corrected = EV_PoW_Age %>%
+  left_join(EV_Most_Recent_Sample, join_by("Species")) %>%
+  mutate(Start_Date = Upper + (2025 - Most_Recent_Sample_Date)) %>%
+  mutate(End_Date = Lower + (2025 - Most_Recent_Sample_Date)) %>%
+  mutate(Median = Median + (2025 - Most_Recent_Sample_Date)) %>%
+  select(Species, Protein, Start_Date, End_Date, Median)
+
+#pdf("EV_PoW_Age_Corrected.pdf", height = 4, width = 8)
+
+ggplot(EV_PoW_Age_Corrected) +
+  #geom_vline(aes(xintercept = 0), color = "black", linewidth = 0.5, linetype = 2) +
+  geom_segment(aes(x = Start_Date, xend = End_Date, y = Protein, color = Species), linewidth = 7, lineend = "round") +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") +
+  new_scale_color() +
+  geom_segment(aes(x = Start_Date + 50, xend = End_Date - 50, y = Protein, color = Species), linewidth = 5, lineend = "round") +
+  scale_color_manual(values = c("#b4b0d8", "#f9cbdc", "#ffe2b9", "#97cf93"), guide = "none") +
+  new_scale_color() +
+  geom_point(aes(x = Median, y = Protein, color = Species), size = 5) +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen"), guide = "none") +
+  scale_x_continuous(breaks = seq(0, 40000, by = 5000), minor_breaks = seq(0, 40000, by = 1000), trans = "reverse") +
+  xlab("Years Before Present") +
+  theme_prism() +
+  theme(panel.grid.major = element_line(color = "lightgrey", size = 0.25), panel.grid.minor = element_line(color = "lightgrey", size = 0.1)) +
+  facet_wrap(~Species, ncol = 1, strip.position = "right")
+
+#dev.off()
+```
+
+Clock Rate
+```{r}
+BEAST_VP1_ClockRate_Summary = EV_BEAST_VP1_Results %>%
+  group_by(Species) %>%
+  summarise(Median_ClockRate_VP1 = median(ucld.mean))
+
+BEAST_VP1_ClockRate_Summary$Median_ClockRate_VP1 = as.numeric(BEAST_VP1_ClockRate_Summary$Median_ClockRate_VP1)
+
+BEAST_3D_ClockRate_Summary = EV_BEAST_3D_Results %>%
+  group_by(Species) %>%
+  summarise(Median_ClockRate_3D = median(ucld.mean))
+
+BEAST_3D_ClockRate_Summary$Median_ClockRate_3D = as.numeric(BEAST_3D_ClockRate_Summary$Median_ClockRate_3D)
+
+EV_ClockRate = rbind(EV_VP1_ClockRate, EV_3D_ClockRate) %>%
+  mutate(Approach = "BEAST") %>%
+  mutate(Metric = "Clock Rate")
+
+EV_ClockRate$Protein = factor(EV_ClockRate$Protein , levels = c("VP1", "3D"))
+```
+
+Tree Statistics
+```{r}
+EVA_Tree_Statistics = read_csv("Enterovirus_A/EVA_Tree_Statistics.csv") %>%
+  mutate(Species = "EVA")
+
+EVB_Tree_Statistics = read_csv("Enterovirus_B/EVB_Tree_Statistics.csv") %>%
+  mutate(Species = "EVB")
+
+EVC_Tree_Statistics = read_csv("Enterovirus_C/EVC_Tree_Statistics.csv") %>%
+  mutate(Species = "EVC")
+
+EVD_Tree_Statistics = read_csv("Enterovirus_D/EVD_Tree_Statistics.csv") %>%
+  mutate(Species = "EVD")
+
+EV_Tree_Statistics = rbind(EVA_Tree_Statistics, EVB_Tree_Statistics, EVC_Tree_Statistics, EVD_Tree_Statistics) %>%
+  select(Species, everything()) %>%
+  select(-Run) %>%
+  gather(key = "Tree Statistic", value = "Value", 2:4)
+```
+
+Treeness
+```{r}
+EV_Treeness_Summary = EV_Tree_Statistics %>%
+  filter(`Tree Statistic` != "RF_Distance") %>%
+  mutate(Protein = substr(`Tree Statistic`, 1, nchar(`Tree Statistic`) - 9)) %>%
+  group_by(Species, Protein) %>%
+  summarise(Median_Treeness = median(Value), Lower_95HPD_Treeness = HPDinterval(as.mcmc(Value), prob = 0.95)[1], Upper_95HPD_Treeness = HPDinterval(as.mcmc(Value), prob = 0.95)[2])
+
+EV_VP1_Treeness_Summary = EV_Treeness_Summary %>%
+  filter(Protein == "VP1") %>%
+  dplyr::rename(Median_VP1_Treeness = Median_Treeness, Lower_VP1_95HPD_Treeness = Lower_95HPD_Treeness, Upper_VP1_95HPD_Treeness = Upper_95HPD_Treeness) %>%
+  select(-Protein)
+
+EV_3D_Treeness_Summary = EV_Treeness_Summary %>%
+  filter(Protein == "3D") %>%
+  dplyr::rename(Median_3D_Treeness = Median_Treeness, Lower_3D_95HPD_Treeness = Lower_95HPD_Treeness, Upper_3D_95HPD_Treeness = Upper_95HPD_Treeness) %>%
+  select(-Protein)
+
+#pdf("EV_Treeness.pdf", height = 4, width = 8)
+
+ggplot(EV_Treeness_Summary, aes(color = Species)) +
+  geom_pointrange(aes(x = Protein, y = Median_Treeness, ymin= Lower_95HPD_Treeness, ymax = Upper_95HPD_Treeness)) +
+  theme_prism() +
+  ylab("Treeness") +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  theme(legend.position = "none", panel.grid.major = element_line(color = "lightgrey", size = 0.1), panel.grid.minor = element_line(color = "lightgrey", size = 0.1)) +
+  facet_wrap(~Species, nrow = 1)
+
+#dev.off()
+```
+
+All BEAST data table
+```{r}
+EV_BEAST_Results = rbind(EV_Age, EV_ClockRate) %>%
+  mutate(Lower = ifelse(Metric == "Age", round(as.numeric(Lower), digits = 2), formatC(as.numeric(Lower), format = "e", digits = 2))) %>%
+  mutate(Upper = ifelse(Metric == "Age", round(as.numeric(Upper), digits = 2), formatC(as.numeric(Upper), format = "e", digits = 2))) %>%
+  mutate(Median = ifelse(Metric == "Age", round(as.numeric(Median), digits = 2), formatC(as.numeric(Median), format = "e", digits = 2))) %>%
+  mutate(Mean = ifelse(Metric == "Age", round(as.numeric(Mean), digits = 2), formatC(as.numeric(Mean), format = "e", digits = 2)))
+  
+EV_BEAST_Results_NoCorrection = EV_BEAST_Results %>%
+  filter(Approach == "BEAST") %>%
+  filter(Metric == "Age") %>%
+  arrange(Species) %>%
+  select(Protein, Median, Lower, Upper)
+  
+EV_BEAST_Results_PoW = EV_BEAST_Results %>%
+  filter(Approach == "BEAST w/ PoW") %>%
+  filter(Metric == "Age") %>%
+  arrange(Species) %>%
+  dplyr::rename(Median_PoW = Median, Lower_PoW = Lower, Upper_PoW = Upper) %>%
+  select(Median_PoW, Lower_PoW, Upper_PoW)
+
+EV_BEAST_Results_ClockRate = EV_BEAST_Results %>%
+  filter(Metric == "Clock Rate") %>%
+  arrange(Species) %>%
+  dplyr::rename(Median_CR = Median, Lower_CR = Lower, Upper_CR = Upper) %>%
+  select(Median_CR, Lower_CR, Upper_CR)
+
+EV_BEAST_Results_Treeness = EV_Treeness_Summary %>%
+  ungroup() %>%
+  mutate_at(vars(Median_Treeness, Lower_95HPD_Treeness, Upper_95HPD_Treeness), funs(round(., 3))) %>%
+  arrange(Species, desc(Protein)) %>%
+  select(Median_Treeness, Lower_95HPD_Treeness, Upper_95HPD_Treeness)
+
+cbind(EV_BEAST_Results_NoCorrection, EV_BEAST_Results_PoW, EV_BEAST_Results_ClockRate, EV_BEAST_Results_Treeness) %>%
+  gt() %>%
+  tab_style(style = cell_text(style = "italic"), locations = cells_column_labels()) %>%
+  tab_spanner(id = "A", label = md("95% HPD"), columns = c(Lower, Upper)) %>%
+  tab_spanner(label = md("**Root Height<sup><small>1</small></sup>**"), columns = c(Median, Lower, Upper)) %>%
+  tab_spanner(id = "B", label = md("95% HPD"), columns = c(Lower_PoW, Upper_PoW)) %>%
+  tab_spanner(label = md("**PoW-Corrected Root Height<sup><small>1</small></sup>**"), columns = c(Median_PoW, Lower_PoW, Upper_PoW)) %>%
+  tab_spanner(id = "C", label = md("95% HPD"), columns = c(Lower_CR, Upper_CR)) %>%
+  tab_spanner(label = md("**Clock Rate<sup><small>2</small></sup>**"), columns = c(Median_CR, Lower_CR, Upper_CR)) %>%
+  tab_spanner(id = "D", label = md("95% HPD"), columns = c(Lower_95HPD_Treeness, Upper_95HPD_Treeness)) %>%
+  tab_spanner(label = md("**Treeness**"), columns = c(Median_Treeness, Lower_95HPD_Treeness, Upper_95HPD_Treeness)) %>%
+  cols_label(Median_PoW = "Median", Lower_PoW = "Lower", Upper_PoW = "Upper", Median_CR = "Median", Lower_CR = "Lower", Upper_CR = "Upper", Median_Treeness = "Median", Lower_95HPD_Treeness = "Lower", Upper_95HPD_Treeness = "Upper") %>%
+  tab_row_group(label = md("***Enterovirus D***"), rows = 7:8) %>%
+  tab_row_group(label = md("***Enterovirus C***"), rows = 5:6) %>%
+  tab_row_group(label = md("***Enterovirus B***"), rows = 3:4) %>%
+  tab_row_group(label = md("***Enterovirus A***"), rows = 1:2) %>%
+  tab_footnote(footnote = md("<sup><small>1</small></sup> Years<br /><sup><small>2</small></sup> Substitutions per site per year")) %>%
+  #tab_options(table.width = "1000px") %>%
+  gtsave("EV_BEAST_Results_Table.png")
+```
+
+#Metric Comparisons
+All Network metrics
+```{r}
+All_Network_Metric_Comparison = full_join(Whole_Species_Entropy_Structural_Summary, Whole_Species_Entropy_Nonstructural_Summary, by = "Species") %>%
+  full_join(Type_Entropy_Structural_Summary, by = "Species") %>%
+  full_join(Type_Entropy_Nonstructural_Summary, by = "Species") %>%
+  full_join(EV_Network_Summary, by = "Species") %>%
+  mutate(Mean_Entropy_Difference = Mean_Structural_Entropy - Mean_Nonstructural_Entropy) %>%
+  mutate(SE_Entropy_Difference = sqrt(SE_Structural_Entropy^2 + SE_Nonstructural_Entropy^2)) %>%
+  mutate(Mean_Type_Entropy_Difference = Mean_Type_Nonstructural_Entropy - Mean_Type_Structural_Entropy) %>%
+  mutate(SE_Type_Entropy_Difference = sqrt(SE_Type_Structural_Entropy^2 + SE_Type_Nonstructural_Entropy^2))
+
+All_Network_Metric_Comparison_Means = All_Network_Metric_Comparison[,c(10, 12, 14, 16, 18)]
+
+All_Network_Metric_Correlation = cor(All_Network_Metric_Comparison_Means)
+All_Network_Metric_Correlation_pVal = cor_pmat(All_Network_Metric_Comparison_Means)
+corrplot(All_Network_Metric_Correlation)
+
+ggpairs(All_Network_Metric_Comparison, columns = c(10, 12, 14, 16, 18)) 
+
+Entropy_Difference_Network_Correlations  = cbind(row.names(All_Network_Metric_Correlation), as.data.frame(All_Network_Metric_Correlation)) %>%
+  mutate(Metric = `row.names(All_Network_Metric_Correlation)`) %>%
+  select(Metric, Mean_Entropy_Difference, Mean_Type_Entropy_Difference) %>%
+  filter(Metric != "Mean_Entropy_Difference", Metric != "Mean_Type_Entropy_Difference")
+```
+
+```{r}
+pdf("Mean_Connectivity_vs_Mean_Entropy_Difference.pdf", height = 4, width = 6)
+#png("Mean_Connectivity_vs_Mean_Entropy_Difference.pdf", width = 1500, height = 1000, res = 300)
+
+ggplot(All_Network_Metric_Comparison, aes(x = Mean_Connectivity, y = Mean_Entropy_Difference)) +
+  stat_cor(label.y = 0.19) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", size = 0, alpha = 0.1) +
+  geom_line(stat = "smooth", method = "lm", formula = y ~ x, size = 0.5, linetype = 2, alpha = 0.25) +
+  geom_errorbar(aes(ymin = Mean_Entropy_Difference - SE_Entropy_Difference, ymax = Mean_Entropy_Difference + SE_Entropy_Difference), colour="black", width = 0.05, alpha = 0.4) +
+  geom_errorbar(aes(xmin = Mean_Connectivity - SE_Connectivity, xmax = Mean_Connectivity + SE_Connectivity), colour="black", width = 0.0025, alpha = 0.4) +
+    geom_point(aes(color = Species), size = 4) +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  xlab("Mean Neighborhood Connectivity") +
+  ylab("Species Entropy Difference\n(Structrual-Nonstructural)") +
+  theme_prism()
+
+dev.off()
+```
+
+All SSE Metrics
+```{r}
+All_SSE_Metric_Comparison = full_join(Whole_Species_Entropy_Structural_Summary, Whole_Species_Entropy_Nonstructural_Summary, by = "Species") %>%
+  full_join(Type_Entropy_Structural_Summary, by = "Species") %>%
+  full_join(Type_Entropy_Nonstructural_Summary, by = "Species") %>%
+  full_join(EV_TOS_ViolationLists_Summary, by = "Species") %>%
+  full_join(EV_Fst_Summary, by = "Species") %>%
+  mutate(Mean_Entropy_Difference = Mean_Structural_Entropy - Mean_Nonstructural_Entropy) %>%
+  mutate(SE_Entropy_Difference = sqrt(SE_Structural_Entropy^2 + SE_Nonstructural_Entropy^2)) %>%
+  mutate(Mean_Type_Entropy_Difference = Mean_Type_Nonstructural_Entropy - Mean_Type_Structural_Entropy) %>%
+  mutate(SE_Type_Entropy_Difference = sqrt(SE_Type_Structural_Entropy^2 + SE_Type_Nonstructural_Entropy^2))
+
+All_SSE_Metric_Comparison_Means = All_SSE_Metric_Comparison[,c(10, 12, 14, 16, 17, 18, 20)]
+
+All_SSE_Metric_Correlation = cor(All_SSE_Metric_Comparison_Means)
+All_SSE_Metric_Correlation_pVal = cor_pmat(All_SSE_Metric_Comparison_Means)
+corrplot(All_SSE_Metric_Correlation)
+
+ggpairs(All_SSE_Metric_Comparison, columns = c(10, 12, 14, 16, 17, 18, 20)) 
+
+Entropy_Difference_SSE_Correlations  = cbind(row.names(All_SSE_Metric_Correlation), as.data.frame(All_SSE_Metric_Correlation)) %>%
+  mutate(Metric = `row.names(All_SSE_Metric_Correlation)`) %>%
+  select(Metric, Mean_Entropy_Difference, Mean_Type_Entropy_Difference) %>%
+  filter(Metric != "Mean_Entropy_Difference", Metric != "Mean_Type_Entropy_Difference")
+```
+
+```{r}
+pdf("Mean_BGViolationsPerClade_vs_Mean_Entropy_Difference.pdf", height = 4, width = 6)
+#png("Mean_BGViolationsPerClade_vs_Mean_Entropy_Difference.pdf", width = 1500, height = 1000, res = 300)
+
+ggplot(All_SSE_Metric_Comparison, aes(x = Mean_BGViolationsPerClade, y = Mean_Entropy_Difference)) +
+  stat_cor(label.y = 0.19) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", size = 0, alpha = 0.1) +
+  geom_line(stat = "smooth", method = "lm", formula = y ~ x, size = 0.5, linetype = 2, alpha = 0.25) +
+  geom_errorbar(aes(ymin = Mean_Entropy_Difference - SE_Entropy_Difference, ymax = Mean_Entropy_Difference + SE_Entropy_Difference), colour="black", width = 0.005, alpha = 0.4) +
+  geom_errorbar(aes(xmin = Mean_BGViolationsPerClade - SE_BGViolationsPerClade, xmax = Mean_BGViolationsPerClade + SE_BGViolationsPerClade), colour="black", width = 0.0025, alpha = 0.4) +
+    geom_point(aes(color = Species), size = 4) +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  xlab("Mean BG/Clade") +
+  ylab("Mean Entropy Difference") +
+  theme_prism()
+
+dev.off()
+
+pdf("Nonstructural_Fst_vs_Mean_Entropy_Difference.pdf", height = 4, width = 6)
+#png("Mean_BGViolationsPerClade_vs_Mean_Entropy_Difference.pdf", width = 1500, height = 1000, res = 300)
+
+ggplot(All_SSE_Metric_Comparison, aes(x = Fst_Nonstructural, y = Mean_Entropy_Difference)) +
+  stat_cor(label.y = 0.21) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", size = 0, alpha = 0.1) +
+  geom_line(stat = "smooth", method = "lm", formula = y ~ x, size = 0.5, linetype = 2, alpha = 0.25) +
+  geom_errorbar(aes(ymin = Mean_Entropy_Difference - SE_Entropy_Difference, ymax = Mean_Entropy_Difference + SE_Entropy_Difference), colour="black", width = 0.005, alpha = 0.4) +
+    geom_point(aes(color = Species), size = 4) +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  xlab(expression(bold("Nonstructural F"[ST]))) +
+  ylab("Mean Entropy Difference") +
+  theme_prism()
+
+dev.off()
+```
+
+All BEAST Metrics
+```{r}
+All_BEAST_Metric_Comparison = full_join(Whole_Species_Entropy_Structural_Summary, Whole_Species_Entropy_Nonstructural_Summary, by = "Species") %>%
+  full_join(Type_Entropy_Structural_Summary, by = "Species") %>%
+  full_join(Type_Entropy_Nonstructural_Summary, by = "Species") %>%
+  full_join(BEAST_VP1_Ages_Summary, by = "Species") %>%
+  full_join(BEAST_3D_Ages_Summary, by = "Species") %>%
+  full_join(EV_VP1_PoW_Age_Summary, by = "Species") %>%
+  full_join(EV_3D_PoW_Age_Summary, by = "Species") %>%
+  full_join(BEAST_VP1_ClockRate_Summary, by = "Species") %>%
+  full_join(BEAST_3D_ClockRate_Summary, by = "Species") %>%
+  full_join(EV_VP1_Treeness_Summary, by = "Species") %>%
+  full_join(EV_3D_Treeness_Summary, by = "Species") %>%
+  mutate(Age_Difference = Median_Age_VP1_PoW - Median_Age_3D_PoW) %>%
+  mutate(ClockRate_Difference = Median_ClockRate_VP1 - Median_ClockRate_3D) %>%
+  mutate(Median_Treeness_Difference = Median_VP1_Treeness - Median_3D_Treeness) %>%
+  mutate(Mean_Entropy_Difference = Mean_Structural_Entropy - Mean_Nonstructural_Entropy) %>%
+  mutate(SE_Entropy_Difference = sqrt(SE_Structural_Entropy^2 + SE_Nonstructural_Entropy^2)) %>%
+  mutate(Mean_Type_Entropy_Difference = Mean_Type_Nonstructural_Entropy - Mean_Type_Structural_Entropy) %>%
+  mutate(SE_Type_Entropy_Difference = sqrt(SE_Type_Structural_Entropy^2 + SE_Type_Nonstructural_Entropy^2)) 
+
+All_BEAST_Metric_Means = All_BEAST_Metric_Comparison[,c(2, 4, 6, 8, 10, 11, 12, 13, 14, 15, 16, 19, 22, 23, 24, 25, 27)]
+
+All_BEAST_Metric_Correlation = cor(All_BEAST_Metric_Means)
+All_BEAST_Metric_Correlation_pVal = cor_pmat(All_BEAST_Metric_Means)
+corrplot(All_BEAST_Metric_Correlation)
+
+pdf("All_BEAST_Metric_ggPairs.pdf", width = 15, height = 15)
+
+ggpairs(All_BEAST_Metric_Comparison, columns = c(2, 4, 6, 8, 10, 11, 12, 13, 14, 15, 16, 19, 22, 23, 24, 25, 27)) 
+
+dev.off()
+```
+
+Entropy vs. Similarity
+```{r}
+Entropy_vs_Similarity = full_join(Whole_Species_Entropy_Structural_Summary, Whole_Species_Entropy_Nonstructural_Summary, by = "Species") %>%
+  full_join(Whole_Species_Entropy_Summary, by = "Species") %>%
+  full_join(Type_Entropy_Structural_Summary, by = "Species") %>%
+  full_join(Type_Entropy_Nonstructural_Summary, by = "Species") %>%
+  full_join(Type_Entropy_Summary, by = "Species") %>%
+  full_join(Enterovirus_betweenStructural_Distances_Combined_Summary, by = "Species") %>%
+  full_join(Enterovirus_betweenNonstructural_Distances_Combined_Summary, by = "Species") %>%
+  full_join(EV_Hamming_Distances_Summary_betweenTypes, by = "Species") %>%
+  mutate(Mean_Entropy_Difference = Mean_Structural_Entropy - Mean_Nonstructural_Entropy) %>%
+  mutate(SE_Entropy_Difference = sqrt(SE_Structural_Entropy^2 + SE_Nonstructural_Entropy^2)) %>%
+  mutate(Mean_Type_Entropy_Difference = Mean_Type_Nonstructural_Entropy - Mean_Type_Structural_Entropy) %>%
+  mutate(SE_Type_Entropy_Difference = sqrt(SE_Type_Structural_Entropy^2 + SE_Type_Nonstructural_Entropy^2)) %>%
+  mutate(Mean_Distance_Difference = Mean_Structural_Distance - Mean_Nonstructural_Distance) %>%
+  mutate(SE_Distance_Difference = sqrt(SE_Nonstructural_Distance^2 + SE_Structural_Distance^2))
+
+Entropy_vs_Similarity_Means = Entropy_vs_Similarity[,c(2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24)]
+
+Entropy_vs_Similarity_Correlation = cor(Entropy_vs_Similarity_Means)
+Entropy_vs_Similarity_Correlation_pVal = cor_pmat(Entropy_vs_Similarity_Means)
+corrplot(Entropy_vs_Similarity_Correlation)
+
+pdf("Entropy_vs_Similarity_ggPairs.pdf", width = 15, height = 15)
+
+ggpairs(Entropy_vs_Similarity, columns = c(2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24)) 
+
+dev.off()
+```
+
+Entropy difference vs. Select metrics
+```{r}
+Metric <- rownames(All_Network_Metric_Correlation)
+All_Network_Metric_Correlation_vsEntropy_Difference = as.data.frame(cbind(Metric, All_Network_Metric_Correlation)) %>%
+  select(Metric, Mean_Entropy_Difference, Mean_Type_Entropy_Difference)
+All_Network_Metric_Correlation_vsEntropy_Difference_pVal = cbind(Metric, All_Network_Metric_Correlation_pVal) %>%
+  select(Metric, Mean_Entropy_Difference, Mean_Type_Entropy_Difference) 
+
+Metric <- rownames(All_SSE_Metric_Correlation)
+All_SSE_Metric_Correlation_vsEntropy_Difference = as.data.frame(cbind(Metric, All_SSE_Metric_Correlation)) %>%
+  select(Metric, Mean_Entropy_Difference, Mean_Type_Entropy_Difference)
+All_SSE_Metric_Correlation_vsEntropy_Difference_pVal = cbind(Metric, All_SSE_Metric_Correlation_pVal) %>%
+  select(Metric, Mean_Entropy_Difference, Mean_Type_Entropy_Difference) 
+
+Metric <- rownames(All_BEAST_Metric_Correlation)
+All_BEAST_Metric_Correlation_vsEntropy_Difference = as.data.frame(cbind(Metric, All_BEAST_Metric_Correlation)) %>%
+  select(Metric, Mean_Entropy_Difference, Mean_Type_Entropy_Difference)
+All_BEAST_Metric_Correlation_vsEntropy_Difference_pVal = cbind(Metric, All_BEAST_Metric_Correlation_pVal) %>%
+  select(Metric, Mean_Entropy_Difference, Mean_Type_Entropy_Difference)
+
+All_Metrics_vsEntropy_Difference_Correlations_pVal = rbind(All_Network_Metric_Correlation_vsEntropy_Difference_pVal, All_SSE_Metric_Correlation_vsEntropy_Difference_pVal, All_BEAST_Metric_Correlation_vsEntropy_Difference_pVal) %>%
+  filter(Metric != "Mean_Entropy_Difference") %>%
+  filter(Metric != "Mean_Type_Entropy_Difference") %>%
+  gather(key = "Entropy_Difference", value = "P-Value", 2:3) %>%
+  mutate(Entropy_Difference = ifelse(Entropy_Difference == "Mean_Type_Entropy_Difference", "By type", "By species"))
+
+All_Metrics_vsEntropy_Difference_Correlations = rbind(All_Network_Metric_Correlation_vsEntropy_Difference, All_SSE_Metric_Correlation_vsEntropy_Difference, All_BEAST_Metric_Correlation_vsEntropy_Difference) %>%
+  filter(Metric != "Mean_Entropy_Difference") %>%
+  filter(Metric != "Mean_Type_Entropy_Difference") %>%
+  gather(key = "Entropy_Difference", value = "Correlation", 2:3) %>%
+  mutate(Entropy_Difference = ifelse(Entropy_Difference == "Mean_Type_Entropy_Difference", "By type", "By species")) %>%
+  full_join(All_Metrics_vsEntropy_Difference_Correlations_pVal, by = c("Metric", "Entropy_Difference")) %>%
+  mutate(Metric = ifelse(Metric == "Mean_Connectivity", "Neighborhood\nConnectivity",
+                         ifelse(Metric == "Mean_BGViolationsPerClade", "BG Violations\nper Clade", 
+                                ifelse(Metric == "Age_Difference", "Age Difference",
+                                       ifelse(Metric == "ClockRate_Difference", "Clock Rate\nDifference",
+                                              ifelse(Metric == "Median_Treeness_Difference", "Treeness\nDifference",
+                                                     ifelse(Metric == "Fst_Structural", "FST Structural",
+                                                            ifelse(Metric == "Fst_Nonstructural", "FST Nonstructural", 
+                                                                   ifelse(Metric == "Median_Age_VP1_PoW", "VP1 Age", "Extra"))))))))) %>%
+  filter(Metric != "Extra") %>%
+  mutate(Correlation = as.numeric(Correlation)) %>%
+  mutate(Significance = ifelse(`P-Value` < 0.05, "*", 
+                               ifelse(`P-Value` < 0.1, ".", ""))) %>%
+  mutate(Significance_Position = ifelse(Correlation < 0, Correlation - 0.1, Correlation + 0.1)) %>%
+  mutate(Color_Scale = (Correlation - min(Correlation))/(max(Correlation) - min(Correlation))) %>%
+  filter(Entropy_Difference == "By species")
+
+Values <- c(-1, -0.5, 0, 0.5, 1)
+Scaled_Correlation_Gradient <- (Values - min(All_Metrics_vsEntropy_Difference_Correlations$Correlation))/(max(All_Metrics_vsEntropy_Difference_Correlations$Correlation) - min(All_Metrics_vsEntropy_Difference_Correlations$Correlation))
+
+All_Metrics_vsEntropy_Difference_Correlations$Metric <- factor(All_Metrics_vsEntropy_Difference_Correlations$Metric, levels = c("VP1 Age", "Age Difference", "Clock Rate\nDifference", "Treeness\nDifference", "FST Structural", "FST Nonstructural", "Neighborhood\nConnectivity", "BG Violations\nper Clade"))
+
+pdf("Entropy_Difference_Correlations.pdf", height = 5, width = 6.5)
+
+ggplot(All_Metrics_vsEntropy_Difference_Correlations) +
+  geom_hline(aes(yintercept = 0), color = "black") +
+  geom_bar(aes(y = Correlation, x = Metric, fill = Correlation), color = "black", stat = "identity") +
+  theme_prism() +
+  xlab("") +
+  ylab("Entropy Difference Correlation\n(Structural - Nonstructural)") +
+  scale_fill_gradientn(colors = c("#bb6c05", "#d48e31", "white", "#1567a4", "#002147"), values = Scaled_Correlation_Gradient, name = "Correlation\nCoefficent") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.title = element_text(size = 12)) +
+  guides(color = "none", size = "none")
+
+dev.off()
+```
+
+Treeness vs. Recombination Plot
+```{r}
+All_TreenessVSRecombination_Comparisons = full_join(EV_VP1_Treeness_Summary, EV_3D_Treeness_Summary, by = "Species") %>%
+  full_join(EV_Network_Summary, by = "Species") %>%
+  mutate(Median_Treeness_Difference = Median_VP1_Treeness - Median_3D_Treeness)
+
+All_TreenessVSRecombination_Means = All_TreenessVSRecombination_Comparisons[,c(2, 5, 8, 10, 12, 14)]
+
+All_TreenessVSRecombination_Correlation = cor(All_TreenessVSRecombination_Means)
+All_TreenessVSRecombination_Correlation_pVal = cor_pmat(All_TreenessVSRecombination_Means)
+corrplot(All_TreenessVSRecombination_Correlation)
+
+ggpairs(All_TreenessVSRecombination_Comparisons, columns = c(2, 5, 8, 10, 12, 14)) 
+```
+
+```{r}
+ggplot(All_TreenessVSRecombination_Comparisons, aes(x = Mean_Connectivity, y = Median_Treeness_Difference)) +
+  stat_cor(label.y = 0.45) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", size = 0, alpha = 0.1) +
+  geom_line(stat = "smooth", method = "lm", formula = y ~ x, size = 0.5, linetype = 2, alpha = 0.25) +
+  #geom_errorbar(aes(ymin = Mean_Entropy_Difference - SE_Entropy_Difference, ymax = Mean_Entropy_Difference + SE_Entropy_Difference), colour="black", width = 0.05, alpha = 0.4) +
+  #geom_errorbar(aes(xmin = Mean_Connectivity - SE_Connectivity, xmax = Mean_Connectivity + SE_Connectivity), colour="black", width = 0.0025, alpha = 0.4) +
+    geom_point(aes(color = Species), size = 4) +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  xlab("Mean Neighborhood Connectivity") +
+  ylab("Treeness Difference\n(VP1-3D)") +
+  theme_prism()
+```
+
+Entropy difference plot
+```{r}
+#png("Entropy_Difference.png", width = 1000, height = 500, res = 300)
+pdf("Entropy_Difference.pdf", height = 3.5, width = 5)
+
+ggplot(Entropy_vs_Similarity, aes(x = Species, y = Mean_Entropy_Difference, fill = Species, color = Species)) +
+  geom_bar(stat = "identity", linewidth = 2) +
+  geom_errorbar(aes(ymin = Mean_Entropy_Difference - SE_Entropy_Difference, ymax = Mean_Entropy_Difference + SE_Entropy_Difference), width = 0.15, color = "black") +
+  theme_prism() +
+  ylab("Entropy Difference\n(Structural - Nonstructural)") + 
+  scale_fill_manual(values = c("#00008B99", "#FF149399", "#DAA52099", "#06402B99")) +
+  scale_color_manual(values = c("darkblue", "deeppink", "goldenrod", "darkgreen")) +
+  theme(legend.position = "none")
+
+dev.off()
+```

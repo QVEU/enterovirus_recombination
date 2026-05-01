@@ -1,0 +1,1697 @@
+---
+title: "Enterovirus_C_Analysis"
+output: html_document
+date: "2025-08-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggprism)
+library(ggpubr)
+library(ggpattern)
+library(tidyquant)
+library(DECIPHER)
+library(QSutils)
+library(coda)
+```
+
+#Read in data
+```{r}
+EVC_ORFs_Complete_Sequences = readDNAStringSet("All_Enterovirus_C_ORF_Curated_Sequences_Trimmed_CompleteSeqs.fasta")
+
+EVC_0.95_Codon_Alignment = readDNAStringSet("Clustering_0.95/All_Enterovirus_C_ORF_Curated_Sequences_Codon_Aligned_Trimmed_CompleteSeqs_0.95_woVaccine.fasta")
+EVC_0.95_AA_Alignment = readAAStringSet("Clustering_0.95/All_Enterovirus_C_ORF_Curated_Sequences_Trimmed_CompleteSeqs_0.95_woVaccine_AA_Aligned.fasta")
+
+EVC_0.95_Codon_Alignment_wVaccine = readDNAStringSet("Clustering_0.95/All_Enterovirus_C_ORF_Curated_Sequences_Codon_Aligned_Trimmed_CompleteSeqs_0.95.fasta")
+  
+EVC_0.95_Types = read_csv("Clustering_0.95/EVC_0.95_Types.csv") %>%
+  filter(`BLAST result` == "Picornaviridae Enterovirus C") %>%
+  select(name, type, `VP1 subgenogroup`)
+
+#Write out cleaned type dataset for BEAST
+write_tsv(EVC_0.95_Types, "Clustering_0.95/EVC_0.95_Types_forBEAST.tsv")
+
+EVC_Curation_woVaccineStrains = read_tsv("Clustering_0.95/Curated_EVC_woVaccine_Sequence_Info.tsv")
+```
+
+```{r}
+EVC_woVaccine_Curation = read_tsv("Clustering_0.95/Curated_EVC_woVaccine_Sequence_Info.tsv") %>%
+  select(-type)
+
+EVC_Dates = read_tsv("EVC_Dates.tsv")
+
+EVC_woVaccine_Curation_Complete_Dates = left_join(EVC_woVaccine_Curation, EVC_Dates, join_by(Accession, Year))
+
+write_tsv(EVC_woVaccine_Curation_Complete_Dates, "Clustering_0.95/Curated_EVC_woVaccine_Sequence_Info_Complete_Dates.tsv")
+```
+
+#Summarize types in dataset + extract type-specific sub-datasets
+```{r}
+EVC_0.95_Types_Summary = EVC_Curation_woVaccineStrains %>%
+  group_by(type) %>%
+  summarise(n = n()) %>%
+  arrange(desc(n))
+
+#Extract accession for type with >20 representatives in the sequence set
+CVA24_Accessions = EVC_0.95_Types %>%
+  filter(type == "CV-A24") %>%
+  select(name)
+
+PV3_Accessions = EVC_0.95_Types %>%
+  filter(type == "PV-3") %>%
+  select(name)
+
+CVA13_Accessions = EVC_0.95_Types %>%
+  filter(type == "CV-A13") %>%
+  select(name)
+
+PV1_Accessions = EVC_0.95_Types %>%
+  filter(type == "PV-1") %>%
+  select(name)
+```
+
+#Define protein boundaries
+
+Nucleotide
+```{r}
+Protein <- c("VP4", "VP2", "VP3", "VP1", "2A", "2B", "2C", "3A", "3B", "3C", "3D")
+Start <- c(1, 208, 1072, 1834, 2875, 3322, 3619, 4609, 4882, 4948, 5500)
+End <- c(207, 1071, 1833, 2874, 3321, 3618, 4608, 4881, 4947, 5499, 6798)
+Fill <- c(0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0)
+
+EVC_Alignment_Features = as.data.frame(cbind(Protein, Start, End, Fill)) %>%
+  mutate(Start = as.numeric(Start)) %>%
+  mutate(End = as.numeric(End))
+```
+
+Amino acid
+```{r}
+Protein <- c("VP4", "VP2", "VP3", "VP1", "2A", "2B", "2C", "3A", "3B", "3C", "3D")
+Start <- c(1, 70, 344, 598, 915, 1064, 1161, 1494, 1578, 1600, 1783)
+End <- c(69, 343, 597, 914, 1063, 1160, 1493, 1577, 1599, 1782, 2213)
+Fill <- c(0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0)
+
+EVC_AA_Alignment_Features = as.data.frame(cbind(Protein, Start, End, Fill)) %>%
+  mutate(Start = as.numeric(Start)) %>%
+  mutate(End = as.numeric(End))
+```
+
+#Entropy calculations
+
+All Enterovirus C w/ 1 representative per type (repeated 100 times)
+```{r}
+EVC_1_Shannon_Entropy_Repeated = NULL
+
+for (i in 1:100) {
+  TEMP_EVC_Type_Reps = EVC_0.95_Types %>%
+    sample_frac(1) %>%
+    distinct(type, .keep_all = TRUE) %>%
+    select(name, type) %>%
+    mutate(Iteration = i)
+  
+  TEMP_EVC_1_AA_Alignment = EVC_0.95_AA_Alignment[names(EVC_0.95_AA_Alignment) %in% paste0(TEMP_EVC_Type_Reps$name, "_1")]
+  
+  TEMP_EVC_1_AA_Frequencies <- FreqMat(TEMP_EVC_1_AA_Alignment)
+  Amino_Acid <- rownames(TEMP_EVC_1_AA_Frequencies)
+
+  TEMP_EVC_1_AA_Frequencies_Gaps = cbind(Amino_Acid, as.data.frame(TEMP_EVC_1_AA_Frequencies)) %>%
+    gather(key = "Site", value = "Frequency", 2:(width(TEMP_EVC_1_AA_Alignment)[1] + 1)) %>%
+    mutate(Site = as.numeric(Site) - 1) %>%
+    group_by(Site) %>%
+    summarise(No_Gap_Sites = sum(Frequency)) %>%
+    mutate(Gap_Sites = length(TEMP_EVC_1_AA_Alignment) - No_Gap_Sites) %>%
+    arrange(Site)
+
+  Gap <- TEMP_EVC_1_AA_Frequencies_Gaps$Gap_Sites
+
+  TEMP_EVC_1_AA_Frequencies_Complete <- rbind(TEMP_EVC_1_AA_Frequencies, Gap)
+  Amino_Acid_or_Gap <- rownames(TEMP_EVC_1_AA_Frequencies_Complete)
+  
+  TEMP_EVC_1_AA_Frequencies_DF = cbind(Amino_Acid_or_Gap, as.data.frame(TEMP_EVC_1_AA_Frequencies_Complete/length(TEMP_EVC_1_AA_Alignment))) %>%
+    gather(key = "Site", value = "Frequency", 2:(width(TEMP_EVC_1_AA_Alignment)[1] + 1)) %>%
+    mutate(Site = as.numeric(Site)) %>%
+    filter(Frequency > 0)
+  
+  TEMP_EVC_1_Shannon_Entropy = TEMP_EVC_1_AA_Frequencies_DF %>% 
+    mutate(Site = as.numeric(Site) - 1) %>%
+    group_by(Site) %>%
+    summarise(EVC_1_Entropy = -sum(Frequency * log(Frequency, base = 20))) %>%
+    mutate(Iteration = i)
+  
+  EVC_1_Shannon_Entropy_Repeated = rbind(EVC_1_Shannon_Entropy_Repeated, TEMP_EVC_1_Shannon_Entropy)
+}
+```
+
+```{r}
+EVC_1_Shannon_Entropy_Summary = EVC_1_Shannon_Entropy_Repeated %>%
+  group_by(Site) %>%
+  summarise(Median_Entropy = median(EVC_1_Entropy), Mean_Entropy = mean(EVC_1_Entropy), SD_Entropy = sd(EVC_1_Entropy))
+
+ggplot() +
+  geom_rect(data = EVC_AA_Alignment_Features, aes(xmin = Start, xmax = End, ymin = 0, ymax = 0.55, fill = Fill), alpha = 0.33) +
+  scale_fill_manual(values = c("white", "lightgray")) +
+  geom_ma(data = EVC_1_Shannon_Entropy_Repeated, aes(x = Site, y = EVC_1_Entropy, group = Iteration), ma_fun = SMA, n = 21, linetype = 1, color = "goldenrod", alpha = 0.1) +
+  geom_ma(data = EVC_1_Shannon_Entropy_Summary, aes(x = Site, y = Mean_Entropy), ma_fun = SMA, n = 21, linetype = 1, color = "goldenrod") +
+  geom_vline(xintercept = 915, linetype = 2) +
+  theme_prism() +
+  theme(legend.position = "none")
+```
+
+Coxsackievirus A24
+```{r}
+CVA24_AA_Accessions <- paste0(CVA24_Accessions$name, "_1")
+
+CVA24_0.95_AA_Alignment = EVC_0.95_AA_Alignment[names(EVC_0.95_AA_Alignment) %in% CVA24_AA_Accessions]
+
+Accessions <- names(CVA24_0.95_AA_Alignment)
+CVA24_AA_Alignment_SeqNames = as.data.frame(Accessions) %>%
+  mutate(Accessions = substr(Accessions, 1, nchar(Accessions) - 2))
+
+CVA24_AA_Frequencies <- FreqMat(CVA24_0.95_AA_Alignment)
+Amino_Acid <- rownames(CVA24_AA_Frequencies)
+
+CVA24_AA_Frequencies_Gaps = cbind(Amino_Acid, as.data.frame(CVA24_AA_Frequencies)) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(CVA24_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(No_Gap_Sites = sum(Frequency)) %>%
+  mutate(Gap_Sites = length(CVA24_0.95_AA_Alignment) - No_Gap_Sites) %>%
+  arrange(Site)
+
+Gap <- CVA24_AA_Frequencies_Gaps$Gap_Sites
+
+CVA24_AA_Frequencies_Complete <- rbind(CVA24_AA_Frequencies, Gap)
+Amino_Acid_or_Gap <- rownames(CVA24_AA_Frequencies_Complete)
+
+CVA24_AA_Frequencies_Check = cbind(Amino_Acid_or_Gap, as.data.frame(CVA24_AA_Frequencies_Complete)) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(CVA24_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(No_Gap_Sites = sum(Frequency))
+```
+
+```{r}
+CVA24_Consensus = cbind(Amino_Acid_or_Gap, as.data.frame(CVA24_AA_Frequencies_Complete/length(CVA24_0.95_AA_Alignment))) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(CVA24_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>% 
+  filter(Frequency > 0) %>%
+  group_by(Site) %>%
+  slice_max(Frequency, n = 1) %>%
+  select(Site, Amino_Acid_or_Gap) %>%
+  distinct(Site, .keep_all = TRUE)
+
+CVA24_AA_Frequencies_DF = cbind(Amino_Acid_or_Gap, as.data.frame(CVA24_AA_Frequencies_Complete/length(CVA24_0.95_AA_Alignment))) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(CVA24_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site)) %>%
+  filter(Frequency > 0)
+  
+CVA24_Shannon_Entropy = CVA24_AA_Frequencies_DF %>% 
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(CVA24_Entropy = -sum(Frequency * log(Frequency, base = 20)), Number_of_Residues = n()) %>%
+  full_join(CVA24_Consensus, by = "Site")
+
+ggplot(CVA24_Shannon_Entropy) +
+  geom_rect(data = EVC_AA_Alignment_Features, aes(xmin = Start, xmax = End, ymin = 0, ymax = 0.1, fill = Fill), alpha = 0.33) +
+  scale_fill_manual(values = c("white", "lightgray")) +
+  geom_ma(aes(x = Site, y = CVA24_Entropy), ma_fun = SMA, n = 21, linetype = 1, color = "goldenrod") +
+  geom_vline(xintercept = 915, linetype = 2) +
+  theme_prism() +
+  ylab("") +
+  theme(legend.position = "none")
+```
+
+Poliovirus 3
+```{r}
+PV3_AA_Accessions <- paste0(PV3_Accessions$name, "_1")
+
+PV3_0.95_AA_Alignment = EVC_0.95_AA_Alignment[names(EVC_0.95_AA_Alignment) %in% PV3_AA_Accessions]
+
+Accessions <- names(PV3_0.95_AA_Alignment)
+PV3_AA_Alignment_SeqNames = as.data.frame(Accessions) %>%
+  mutate(Accessions = substr(Accessions, 1, nchar(Accessions) - 2))
+
+PV3_AA_Frequencies <- FreqMat(PV3_0.95_AA_Alignment)
+Amino_Acid <- rownames(PV3_AA_Frequencies)
+
+PV3_AA_Frequencies_Gaps = cbind(Amino_Acid, as.data.frame(PV3_AA_Frequencies)) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(PV3_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(No_Gap_Sites = sum(Frequency)) %>%
+  mutate(Gap_Sites = length(PV3_0.95_AA_Alignment) - No_Gap_Sites) %>%
+  arrange(Site)
+
+Gap <- PV3_AA_Frequencies_Gaps$Gap_Sites
+
+PV3_AA_Frequencies_Complete <- rbind(PV3_AA_Frequencies, Gap)
+Amino_Acid_or_Gap <- rownames(PV3_AA_Frequencies_Complete)
+
+PV3_AA_Frequencies_Check = cbind(Amino_Acid_or_Gap, as.data.frame(PV3_AA_Frequencies_Complete)) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(PV3_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(No_Gap_Sites = sum(Frequency))
+```
+
+```{r}
+PV3_Consensus = cbind(Amino_Acid_or_Gap, as.data.frame(PV3_AA_Frequencies_Complete/length(PV3_0.95_AA_Alignment))) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(PV3_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>% 
+  filter(Frequency > 0) %>%
+  group_by(Site) %>%
+  slice_max(Frequency, n = 1) %>%
+  select(Site, Amino_Acid_or_Gap) %>%
+  distinct(Site, .keep_all = TRUE)
+
+PV3_AA_Frequencies_DF = cbind(Amino_Acid_or_Gap, as.data.frame(PV3_AA_Frequencies_Complete/length(PV3_0.95_AA_Alignment))) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(PV3_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site)) %>%
+  filter(Frequency > 0)
+  
+PV3_Shannon_Entropy = PV3_AA_Frequencies_DF %>% 
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(PV3_Entropy = -sum(Frequency * log(Frequency, base = 20)), Number_of_Residues = n()) %>%
+  full_join(PV3_Consensus, by = "Site")
+
+ggplot(PV3_Shannon_Entropy) +
+  geom_rect(data = EVC_AA_Alignment_Features, aes(xmin = Start, xmax = End, ymin = 0, ymax = 0.1, fill = Fill), alpha = 0.33) +
+  scale_fill_manual(values = c("white", "lightgray")) +
+  geom_ma(aes(x = Site, y = PV3_Entropy), ma_fun = SMA, n = 21, linetype = 1, color = "goldenrod") +
+  geom_vline(xintercept = 915, linetype = 2) +
+  theme_prism() +
+  ylab("") +
+  theme(legend.position = "none")
+```
+
+Coxsackievirus A13
+```{r}
+CVA13_AA_Accessions <- paste0(CVA13_Accessions$name, "_1")
+
+CVA13_0.95_AA_Alignment = EVC_0.95_AA_Alignment[names(EVC_0.95_AA_Alignment) %in% CVA13_AA_Accessions]
+
+Accessions <- names(CVA13_0.95_AA_Alignment)
+CVA13_AA_Alignment_SeqNames = as.data.frame(Accessions) %>%
+  mutate(Accessions = substr(Accessions, 1, nchar(Accessions) - 2))
+
+CVA13_AA_Frequencies <- FreqMat(CVA13_0.95_AA_Alignment)
+Amino_Acid <- rownames(CVA13_AA_Frequencies)
+
+CVA13_AA_Frequencies_Gaps = cbind(Amino_Acid, as.data.frame(CVA13_AA_Frequencies)) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(CVA13_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(No_Gap_Sites = sum(Frequency)) %>%
+  mutate(Gap_Sites = length(CVA13_0.95_AA_Alignment) - No_Gap_Sites) %>%
+  arrange(Site)
+
+Gap <- CVA13_AA_Frequencies_Gaps$Gap_Sites
+
+CVA13_AA_Frequencies_Complete <- rbind(CVA13_AA_Frequencies, Gap)
+Amino_Acid_or_Gap <- rownames(CVA13_AA_Frequencies_Complete)
+
+CVA13_AA_Frequencies_Check = cbind(Amino_Acid_or_Gap, as.data.frame(CVA13_AA_Frequencies_Complete)) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(CVA13_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(No_Gap_Sites = sum(Frequency))
+```
+
+```{r}
+CVA13_Consensus = cbind(Amino_Acid_or_Gap, as.data.frame(CVA13_AA_Frequencies_Complete/length(CVA13_0.95_AA_Alignment))) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(CVA13_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>% 
+  filter(Frequency > 0) %>%
+  group_by(Site) %>%
+  slice_max(Frequency, n = 1) %>%
+  select(Site, Amino_Acid_or_Gap) %>%
+  distinct(Site, .keep_all = TRUE)
+
+CVA13_AA_Frequencies_DF = cbind(Amino_Acid_or_Gap, as.data.frame(CVA13_AA_Frequencies_Complete/length(CVA13_0.95_AA_Alignment))) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(CVA13_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site)) %>%
+  filter(Frequency > 0)
+  
+CVA13_Shannon_Entropy = CVA13_AA_Frequencies_DF %>% 
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(CVA13_Entropy = -sum(Frequency * log(Frequency, base = 20)), Number_of_Residues = n()) %>%
+  full_join(CVA13_Consensus, by = "Site")
+
+ggplot(CVA13_Shannon_Entropy) +
+  geom_rect(data = EVC_AA_Alignment_Features, aes(xmin = Start, xmax = End, ymin = 0, ymax = 0.1, fill = Fill), alpha = 0.33) +
+  scale_fill_manual(values = c("white", "lightgray")) +
+  geom_ma(aes(x = Site, y = CVA13_Entropy), ma_fun = SMA, n = 21, linetype = 1, color = "goldenrod") +
+  geom_vline(xintercept = 915, linetype = 2) +
+  theme_prism() +
+  ylab("") +
+  theme(legend.position = "none")
+```
+
+Poliovirus 1
+```{r}
+PV1_AA_Accessions <- paste0(PV1_Accessions$name, "_1")
+
+PV1_0.95_AA_Alignment = EVC_0.95_AA_Alignment[names(EVC_0.95_AA_Alignment) %in% PV1_AA_Accessions]
+
+Accessions <- names(PV1_0.95_AA_Alignment)
+PV1_AA_Alignment_SeqNames = as.data.frame(Accessions) %>%
+  mutate(Accessions = substr(Accessions, 1, nchar(Accessions) - 2))
+
+PV1_AA_Frequencies <- FreqMat(PV1_0.95_AA_Alignment)
+Amino_Acid <- rownames(PV1_AA_Frequencies)
+
+PV1_AA_Frequencies_Gaps = cbind(Amino_Acid, as.data.frame(PV1_AA_Frequencies)) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(PV1_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(No_Gap_Sites = sum(Frequency)) %>%
+  mutate(Gap_Sites = length(PV1_0.95_AA_Alignment) - No_Gap_Sites) %>%
+  arrange(Site)
+
+Gap <- PV1_AA_Frequencies_Gaps$Gap_Sites
+
+PV1_AA_Frequencies_Complete <- rbind(PV1_AA_Frequencies, Gap)
+Amino_Acid_or_Gap <- rownames(PV1_AA_Frequencies_Complete)
+
+PV1_AA_Frequencies_Check = cbind(Amino_Acid_or_Gap, as.data.frame(PV1_AA_Frequencies_Complete)) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(PV1_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(No_Gap_Sites = sum(Frequency))
+```
+
+```{r}
+PV1_Consensus = cbind(Amino_Acid_or_Gap, as.data.frame(PV1_AA_Frequencies_Complete/length(PV1_0.95_AA_Alignment))) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(PV1_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site) - 1) %>% 
+  filter(Frequency > 0) %>%
+  group_by(Site) %>%
+  slice_max(Frequency, n = 1) %>%
+  select(Site, Amino_Acid_or_Gap) %>%
+  distinct(Site, .keep_all = TRUE)
+
+PV1_AA_Frequencies_DF = cbind(Amino_Acid_or_Gap, as.data.frame(PV1_AA_Frequencies_Complete/length(PV1_0.95_AA_Alignment))) %>%
+  gather(key = "Site", value = "Frequency", 2:(width(PV1_0.95_AA_Alignment)[1] + 1)) %>%
+  mutate(Site = as.numeric(Site)) %>%
+  filter(Frequency > 0)
+  
+PV1_Shannon_Entropy = PV1_AA_Frequencies_DF %>% 
+  mutate(Site = as.numeric(Site) - 1) %>%
+  group_by(Site) %>%
+  summarise(PV1_Entropy = -sum(Frequency * log(Frequency, base = 20)), Number_of_Residues = n()) %>%
+  full_join(PV1_Consensus, by = "Site")
+
+ggplot(PV1_Shannon_Entropy) +
+  geom_rect(data = EVC_AA_Alignment_Features, aes(xmin = Start, xmax = End, ymin = 0, ymax = 0.1, fill = Fill), alpha = 0.33) +
+  scale_fill_manual(values = c("white", "lightgray")) +
+  geom_ma(aes(x = Site, y = PV1_Entropy), ma_fun = SMA, n = 21, linetype = 1, color = "goldenrod") +
+  geom_vline(xintercept = 915, linetype = 2) +
+  theme_prism() +
+  ylab("") +
+  theme(legend.position = "none")
+```
+
+All EVC type combined
+```{r}
+Position <- c(0:(width(EVC_0.95_AA_Alignment)[1] - 1))
+
+All_EVC_Type_Shannon_Entropy = cbind(Position, CVA24_Shannon_Entropy, PV3_Shannon_Entropy, CVA13_Shannon_Entropy, PV1_Shannon_Entropy) %>%
+  select(Position, CVA24_Entropy, PV3_Entropy, CVA13_Entropy, PV1_Entropy) %>%
+  dplyr::rename(CVA24 = CVA24_Entropy, PV3 = PV3_Entropy, CVA13 = CVA13_Entropy, PV1 = PV1_Entropy) %>%
+  gather(key = "Type", value = "Entropy", 2:5) %>%
+  dplyr::rename(Site = Position) %>%
+  mutate(Region = ifelse(Site <= 915, "Structural", "Nonstructural"))
+
+pdf("All_Individual_EVC_Type_Shannon_Entropies.pdf", width = 6, height = 4.2)
+
+ggplot(All_EVC_Type_Shannon_Entropy) +
+  geom_rect(data = EVC_AA_Alignment_Features, aes(xmin = Start, xmax = End, ymin = 0, ymax = 0.175, fill = Fill), alpha = 0.33) +
+  scale_fill_manual(values = c("white", "lightgray")) +
+  geom_ma(aes(x = Site, y = Entropy), ma_fun = SMA, n = 21, linetype = 1, color = "lightgoldenrod") +
+  geom_vline(xintercept = 915, linetype = 2) +
+  theme_prism() +
+  ylab("") +
+  theme(legend.position = "none") +
+  facet_wrap(~Type, ncol = 1, strip.position = "right")
+
+dev.off()
+
+All_EVC_Type_Shannon_Entropy_Region_Summary = All_EVC_Type_Shannon_Entropy %>%
+  group_by(Type, Region) %>%
+  summarise(Mean_Entropy = mean(Entropy)) %>%
+  spread(key = Region, value = Mean_Entropy)
+
+All_EVC_Type_Shannon_Entropy_Region_Comparison = All_EVC_Type_Shannon_Entropy %>%
+  group_by(Type) %>%
+  wilcox_test(Entropy ~ Region) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance("p.adj") %>%
+  full_join(All_EVC_Type_Shannon_Entropy_Region_Summary, by = "Type") %>%
+  select(Type, Structural, Nonstructural, p.adj, p.adj.signif) 
+
+write_csv(All_EVC_Type_Shannon_Entropy_Region_Comparison, "All_EVC_Type_Shannon_Entropy_Region_Comparison.csv")
+
+EVC_Type_Shannon_Entropy = All_EVC_Type_Shannon_Entropy %>%
+  group_by(Site) %>%
+  summarise(Average_Type_Entropy = mean(Entropy), SE_Type_Entropy = sd(Entropy)/sqrt(n()))
+
+ggplot(EVC_Type_Shannon_Entropy) +
+  geom_rect(data = EVC_AA_Alignment_Features, aes(xmin = Start, xmax = End, ymin = 0, ymax = 0.1, fill = Fill), alpha = 0.33) +
+  scale_fill_manual(values = c("white", "lightgray")) +
+  geom_ma(aes(x = Site, y = Average_Type_Entropy), ma_fun = SMA, n = 21, linetype = 1, color = "lightgoldenrod") +
+  geom_vline(xintercept = 915, linetype = 2) +
+  theme_prism() +
+  ylab("") +
+  theme(legend.position = "none")
+```
+
+By Type vs. All EVC Sequence per Type Entropy Comparison
+```{r}
+Type_EVC_1_Entropy_Comparison = EVC_Type_Shannon_Entropy %>%
+  left_join(EVC_1_Shannon_Entropy_Summary, by = "Site") %>%
+  select(Site, Average_Type_Entropy, Mean_Entropy) %>%
+  gather(key = "Metric", value = "Value", 2:3) %>%
+  mutate(Metric = ifelse(Metric == "Average_Type_Entropy", "Type Entropy", "Species Entropy")) %>%
+  mutate(Region = ifelse(Site <= 915, "Structural", "Nonstructural")) %>%
+  mutate(Metric_Region = paste0(Metric, ", ", Region))
+
+write_csv(Type_EVC_1_Entropy_Comparison, "EVC_Entropy_Data.csv")
+
+Type_EVC_1_Entropy_Comparison$Metric <- factor(Type_EVC_1_Entropy_Comparison$Metric, levels = c("Type Entropy", "Species Entropy"))
+
+pdf("EVC_1_Alignment_Entropy_Comparison.pdf", height = 3.5, width = 8.5)
+#png("EVC_1_Alignment_Entropy_Comparison.png", height = 1200, width = 2000, res = 300)
+
+ggplot() +
+  geom_rect(data = EVC_AA_Alignment_Features, aes(xmin = Start, xmax = End, ymin = 0, ymax = 0.6, fill = Fill), alpha = 0.33) +
+  scale_fill_manual(values = c("white", "lightgray")) +
+  geom_ma(data = EVC_Type_Shannon_Entropy, aes(x = Site, y = Average_Type_Entropy - SE_Type_Entropy), ma_fun = SMA, n = 21, linetype = 1, color = "lightgoldenrod", alpha = 0.5) +
+  geom_ma(data = EVC_Type_Shannon_Entropy, aes(x = Site, y = Average_Type_Entropy + SE_Type_Entropy), ma_fun = SMA, n = 21, linetype = 1, color = "lightgoldenrod", alpha = 0.5) +
+  geom_ma(data = EVC_1_Shannon_Entropy_Repeated, aes(x = Site, y = EVC_1_Entropy, group = Iteration), ma_fun = SMA, n = 21, linetype = 1, color = "goldenrod", alpha = 0.015) +
+  geom_ma(data = Type_EVC_1_Entropy_Comparison, aes(x = Site, y = Value, color = Metric), ma_fun = SMA, n = 21, linetype = 1) +
+  scale_color_manual(values = c("lightgoldenrod", "goldenrod")) +
+  geom_vline(xintercept = 915, linetype = 2) +
+  theme_prism() +
+  xlab("Site (21aa window)") +
+  ylab("Entropy") +
+  theme(legend.position = c(1, 0.95), legend.justification = c("right", "top"), legend.margin = margin(0, 0, 0, 0), legend.text = element_text(size = 10)) +
+  guides(fill = "none")
+
+dev.off()
+
+Type_EVC_1_Entropy_Comparison_Pvals = dunn_test(Value ~ Metric_Region, data = Type_EVC_1_Entropy_Comparison)
+
+Type_EVC_1_Entropy_Comparison$Metric_Region = factor(Type_EVC_1_Entropy_Comparison$Metric_Region, levels = c("Type Entropy, Structural", "Type Entropy, Nonstructural", "Species Entropy, Structural", "Species Entropy, Nonstructural"))
+
+pdf("Type_EVC_1_Entropy_Comparison_eCDF.pdf", height = 3.5, width = 5)
+
+ggplot(Type_EVC_1_Entropy_Comparison, aes(x = Value, color = Metric_Region, linetype = Metric_Region)) +
+  stat_ecdf(linewidth = 1) +
+  scale_color_manual(values = c("lightgoldenrod", "lightgoldenrod", "goldenrod", "goldenrod")) +
+  scale_linetype_manual(values = c(1, 2, 1, 2)) +
+  xlim(1, 0) +
+  xlab("Entropy") +
+  ylab("Cumulative Proportion") +
+  theme_prism() +
+  theme(legend.position = c(.05, .95), legend.justification = c("left", "top"), legend.margin = margin(-3, -2, -2, -2), legend.text = element_text(size = 10)) +
+  annotate("segment", x = c(0.40, 0.3985, 0.3985, 0.40), xend = c(0.40, 0.41, 0.41, 0.39), y = c(0.97, 0.97, 0.86, 0.915), yend = c(0.86, 0.97, 0.86, 0.915), colour = "black", size = 0.66) +
+  annotate("text", x = 0.255, y = 0.92, label = "p = 6.110e-08", size = 3.5, fontface = "bold") +
+  annotate("segment", x = c(0.35, 0.3485, 0.3485, 0.35), xend = c(0.35, 0.36, 0.36, 0.34), y = c(0.76, 0.76, 0.66, 0.705), yend = c(0.66, 0.76, 0.66, 0.705), colour = "black", size = 0.66) +
+  annotate("text", x = 0.21, y = 0.71, label = "p = 7.402e-33", size = 3.5, fontface = "bold")
+
+dev.off()
+```
+
+#Similarity calculations
+
+Whole Genome
+```{r}
+EVC_Hamming_Distances_Matrix = DistanceMatrix(EVC_0.95_Codon_Alignment, type = "matrix", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+
+EVC_Hamming_Distances_DF = as.data.frame(EVC_Hamming_Distances_Matrix) %>%
+  mutate(Seq_1 = rownames(EVC_Hamming_Distances_Matrix)) %>%
+  gather(key = Seq_2, value = Hamming_Distance, 1:ncol(EVC_Hamming_Distances_Matrix)) %>%
+  left_join(EVC_0.95_Types, join_by("Seq_1" == "name")) %>%
+  mutate(Seq_1_Type = type) %>%
+  select(-type, -`VP1 subgenogroup`) %>%
+  left_join(EVC_0.95_Types, join_by("Seq_2" == "name")) %>%
+  mutate(Seq_2_Type = type) %>%
+  select(-type, -`VP1 subgenogroup`) %>%
+  mutate(Comparison = ifelse(Seq_1_Type == Seq_2_Type, "Within type", "Between types"))
+
+write_csv(EVC_Hamming_Distances_DF, "EVC_Hamming_Distances.csv")
+
+EVC_Similarity_Summary = EVC_Hamming_Distances_DF %>%
+  mutate(Similarity = 1 - Hamming_Distance) %>%
+  summarise(Mean = mean(Similarity), SD = sd(Similarity), Min = min(Similarity), Max = max(Similarity))
+
+ggplot(EVC_Hamming_Distances_DF, aes(x = Hamming_Distance, pattern = Comparison)) +
+  geom_histogram_pattern(binwidth = 0.01, fill = "goldenrod", color = "black", alpha = 0.7, pattern_color = "white", pattern_fill = "white", pattern_alpha = 1, pattern_angle = 45, pattern_spacing = 0.02, pattern_size = 0.1) +
+  scale_pattern_manual(values = c(`Within type` = "stripe", `Between types` = "none")) +
+  ylab("Count") +
+  xlab("Distance") +
+  theme_prism()
+```
+
+Sliding Window - EVC (nt)
+```{r}
+window_size = 200
+overlap = 100
+
+Average_Distance = NULL
+i = 1
+
+while (i < 6798) {
+  end = ifelse((i + window_size) < 6798, i + window_size, 6798)
+  
+  EVC_Alignment_Segment = subseq(EVC_0.95_Codon_Alignment, i, end)
+  
+  EVC_Alignment_Segment_Distance = as.data.frame(DistanceMatrix(EVC_Alignment_Segment, type = "matrix", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE))
+  
+  Seq_1 <- rownames(EVC_Alignment_Segment_Distance)
+  
+  EVC_Alignment_Segment_Distance = cbind(Seq_1, EVC_Alignment_Segment_Distance) %>%
+    gather(key = Seq_2, value = Distance, 2:(ncol(EVC_Alignment_Segment_Distance) + 1)) %>%
+    left_join(EVC_0.95_Types, join_by(Seq_1 == name)) %>%
+    mutate(Type_1 = type) %>%
+    select(-type, -`VP1 subgenogroup`) %>%
+    left_join(EVC_0.95_Types, join_by(Seq_2 == name)) %>%
+    mutate(Type_2 = type) %>%
+    select(-type, -`VP1 subgenogroup`)
+  
+  EVC_Alignment_Segment_Distance_Within = EVC_Alignment_Segment_Distance %>%
+    filter(Type_1 == Type_2) %>%
+    filter(Seq_1 != Seq_2)
+  
+  EVC_Alignment_Segment_Distance_Between = EVC_Alignment_Segment_Distance %>%
+    filter(Type_1 != Type_2)
+  
+  Average_Segment_Distance_Within = mean(EVC_Alignment_Segment_Distance_Within$Distance)
+  SD_Segment_Distance_Within = sd(EVC_Alignment_Segment_Distance_Within$Distance)
+  SE_Segment_Distance_Within = sd(EVC_Alignment_Segment_Distance_Within$Distance)/sqrt(length(EVC_0.95_Codon_Alignment))
+  
+  Average_Segment_Distance_Between = mean(EVC_Alignment_Segment_Distance_Between$Distance)
+  SD_Segment_Distance_Between = sd(EVC_Alignment_Segment_Distance_Between$Distance)
+  SE_Segment_Distance_Between = sd(EVC_Alignment_Segment_Distance_Between$Distance)/sqrt(length(EVC_0.95_Codon_Alignment))
+  
+  Segment_Entry = c(i, end, Average_Segment_Distance_Within, SD_Segment_Distance_Within, SE_Segment_Distance_Within, Average_Segment_Distance_Between, SD_Segment_Distance_Between, SE_Segment_Distance_Between)
+  
+  Average_Distance = rbind(Average_Distance, Segment_Entry)
+  
+  i = i + overlap
+}
+
+EVC_Average_Distance = as.data.frame(Average_Distance) %>%
+  mutate(Scope = "EVC")
+  
+colnames(EVC_Average_Distance) <- c("Start", "End", "Within_Type_Distance", "Within_Type_SD", "Within_Type_SE", "Between_Type_Distance", "Between_Type_SD", "Between_Type_SE", "Scope")
+
+pdf("EVC_Average_Distance.pdf", height = 3.5, width = 8.5)
+#png("EVC_1_Alignment_Entropy_Comparison.png", height = 1200, width = 2000, res = 300)
+
+ggplot() +
+  geom_rect(data = EVC_Alignment_Features, aes(xmin = Start, xmax = End, ymin = 0, ymax = 0.6, fill = Fill), alpha = 0.33) +
+  scale_fill_manual(values = c("white", "lightgray")) +
+  geom_ribbon(data = EVC_Average_Distance, aes(x = Start + 100, ymin = Within_Type_Distance - Within_Type_SD, ymax = Within_Type_Distance + Within_Type_SD), fill = "lightgoldenrod", alpha = 0.33) +
+  geom_line(data = EVC_Average_Distance, aes(x = Start + 100, y = Within_Type_Distance), linetype = 1, color = "lightgoldenrod") +
+  geom_ribbon(data = EVC_Average_Distance, aes(x = Start + 100, ymin = Between_Type_Distance - Between_Type_SD, ymax = Between_Type_Distance + Between_Type_SD), fill = "goldenrod", alpha = 0.33) +
+  geom_line(data = EVC_Average_Distance, aes(x = Start + 100, y = Between_Type_Distance), linetype = 1, color = "goldenrod") +
+  geom_vline(xintercept = 2875, linetype = 2) +
+  theme_prism() +
+  xlab("Site (nt)") +
+  ylab("% Dissimilarity (nt)") +
+  theme(legend.position = "none")
+
+dev.off()
+
+EVC_Average_Distance_Gathered = EVC_Average_Distance %>%
+  select(Start, End, Within_Type_Distance, Between_Type_Distance) %>%
+  mutate(`Within type` = Within_Type_Distance) %>%
+  mutate(`Between types` = Between_Type_Distance) %>%
+  select(-Within_Type_Distance, -Between_Type_Distance) %>%
+  gather(key = Scope, value = Distance, 3:4)
+
+EVC_Average_Distance_Gathered$Scope = factor(EVC_Average_Distance_Gathered$Scope, levels = c("Within type", "Between types"))
+
+pdf("EVC_Average_Distance_LEGEND.pdf", height = 3.5, width = 7)
+
+ggplot(EVC_Average_Distance_Gathered, aes(x = Start + 100, y = Distance, color = Scope)) +
+  geom_line() +
+  geom_vline(xintercept = 2875, linetype = 2) +
+  theme_prism() +
+  scale_color_manual(values = c("lightgoldenrod", "goldenrod")) +
+  theme(legend.position = "right")
+
+dev.off()
+```
+
+Structural vs. Nonstructural 
+```{r}
+EVC_Alignment_Structural = subseq(EVC_0.95_Codon_Alignment, 1, 2874)
+EVC_Alignment_Structural_Distance = as.data.frame(DistanceMatrix(EVC_Alignment_Structural, type = "matrix", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE))
+EVC_Alignment_Structural_Distance_DF = cbind(Seq_1, EVC_Alignment_Structural_Distance) %>%
+  gather(key = Seq_2, value = Distance, 2:(ncol(EVC_Alignment_Structural_Distance) + 1)) %>%
+  mutate(Region = "Structural") %>%
+  left_join(EVC_0.95_Types, join_by(Seq_1 == name)) %>%
+  mutate(Type_1 = type) %>%
+  select(-type, -`VP1 subgenogroup`) %>%
+  left_join(EVC_0.95_Types, join_by(Seq_2 == name)) %>%
+  mutate(Type_2 = type) %>%
+  select(-type, -`VP1 subgenogroup`) %>%
+  filter(Seq_1 != Seq_2) %>%
+  mutate(Comparison = ifelse(Type_1 == Type_2, "Within type", "Between types"))
+
+EVC_Alignment_Nonstructural = subseq(EVC_0.95_Codon_Alignment, 2875, 6798)
+EVC_Alignment_Nonstructural_Distance = as.data.frame(DistanceMatrix(EVC_Alignment_Nonstructural, type = "matrix", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE))
+EVC_Alignment_Nonstructural_Distance_DF = cbind(Seq_1, EVC_Alignment_Nonstructural_Distance) %>%
+  gather(key = Seq_2, value = Distance, 2:(ncol(EVC_Alignment_Nonstructural_Distance) + 1)) %>%
+  mutate(Region = "Nonstructural") %>%
+  left_join(EVC_0.95_Types, join_by(Seq_1 == name)) %>%
+  mutate(Type_1 = type) %>%
+  select(-type, -`VP1 subgenogroup`) %>%
+  left_join(EVC_0.95_Types, join_by(Seq_2 == name)) %>%
+  mutate(Type_2 = type) %>%
+  select(-type, -`VP1 subgenogroup`) %>%
+  filter(Seq_1 != Seq_2) %>%
+  mutate(Comparison = ifelse(Type_1 == Type_2, "Within type", "Between types"))
+
+EVC_Alignment_Region_Distances = rbind(EVC_Alignment_Structural_Distance_DF, EVC_Alignment_Nonstructural_Distance_DF) %>%
+  mutate(Metric = "EVC_nt", Species = "EVC") %>%
+  mutate(Comparison_Region = paste0(Comparison, ", ", Region))
+
+write_csv(EVC_Alignment_Region_Distances, "EVC_Region_Distances_Combined.csv")
+
+EVC_Alignment_Region_Distances$Comparison = factor(EVC_Alignment_Region_Distances$Comparison, levels = c("Within type", "Between types"))
+
+pdf("EVC_Alignment_Region_Distances.pdf", height = 3.5, width = 7)
+#png("EVC_Alignment_Region_Distances.png", height = 1000, width = 2000, res = 300)
+
+ggviolin(EVC_Alignment_Region_Distances, x = "Region", y = "Distance", fill = "Comparison", color = "black", add = "boxplot", add.params = list(fill = "white", width = 0.05)) +
+  stat_compare_means(label.y = 0.45) +
+  theme_prism() +
+  ylab("% Dissimilarity (nt)") +
+  scale_fill_manual(values = c("lightgoldenrod", "goldenrod")) +
+  theme(legend.position = "none") +
+  facet_wrap(~Comparison)
+
+dev.off()
+
+EVC_Alignment_Region_Distances$Comparison_Region = factor(EVC_Alignment_Region_Distances$Comparison_Region, level = c("Within type, Structural", "Within type, Nonstructural", "Between types, Structural", "Between types, Nonstructural"))
+
+pdf("EVC_Dissimilarity_eCDF.pdf", height = 3.5, width = 5)
+
+ggplot(EVC_Alignment_Region_Distances, aes(x = Distance, color = Comparison_Region, linetype = Comparison_Region)) +
+  stat_ecdf(linewidth = 1) +
+  scale_color_manual(values = c("lightgoldenrod", "lightgoldenrod", "goldenrod", "goldenrod")) +
+  scale_linetype_manual(values = c(1, 2, 1, 2)) +
+  xlim(1, 0) +
+  xlab("% Dissimilarity (nt)") +
+  ylab("Cumulative Proportion") +
+  theme_prism() +
+  theme(legend.position = c(.05, .95), legend.justification = c("left", "top"), legend.margin = margin(-3, -2, -2, -2), legend.text = element_text(size = 10))
+  #annotate("segment", x = c(0.63, 0.6285, 0.6285, 0.63), xend = c(0.63, 0.64, 0.64, 0.62), y = c(0.97, 0.97, 0.90, 0.935), yend = c(0.90, 0.97, 0.90, 0.935), colour = "black", size = 0.66) +
+  #annotate("text", x = 0.55, y = 0.94, label = "p < 2.2e-16", size = 3.5, fontface = "bold") +
+  #annotate("segment", x = c(0.59, 0.5885, 0.5885, 0.59), xend = c(0.59, 0.60, 0.60, 0.58), y = c(0.83, 0.83, 0.76, 0.795), yend = c(0.76, 0.83, 0.76, 0.795), colour = "black", size = 0.66) +
+  #annotate("text", x = 0.505, y = 0.80, label = "p < 2.2e-16", size = 3.5, fontface = "bold")
+
+dev.off()
+```
+
+#Network construction
+P1, P2, + P3 Clusters - BEAST Curated 95% Clustered 
+```{r}
+EVC_Alignment_P1 = subseq(EVC_0.95_Codon_Alignment, 1, 2874)
+EVC_Alignment_P1_Similarity_Matrix = DistanceMatrix(EVC_Alignment_P1, type = "matrix", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+EVC_Alignment_P1_Similarity = as.data.frame(EVC_Alignment_P1_Similarity_Matrix)
+writeXStringSet(EVC_Alignment_P1, "Clustering_0.95/P1_P2_P3/All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_P1.fasta")
+
+EVC_Alignment_P2 = subseq(EVC_0.95_Codon_Alignment, 2875, 4608)
+EVC_Alignment_P2_Similarity_Matrix = DistanceMatrix(EVC_Alignment_P2, type = "matrix", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+EVC_Alignment_P2_Similarity = as.data.frame(EVC_Alignment_P2_Similarity_Matrix)
+writeXStringSet(EVC_Alignment_P2, "Clustering_0.95/P1_P2_P3/All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_P2.fasta")
+
+EVC_Alignment_P3 = subseq(EVC_0.95_Codon_Alignment, 4609, 6798)
+EVC_Alignment_P3_Similarity_Matrix = DistanceMatrix(EVC_Alignment_P3, type = "matrix", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+EVC_Alignment_P3_Similarity = as.data.frame(EVC_Alignment_P3_Similarity_Matrix)
+writeXStringSet(EVC_Alignment_P3, "Clustering_0.95/P1_P2_P3/All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_P3.fasta")
+```
+
+```{r}
+EVC_Alignment_P1_Similarity_Dist = DistanceMatrix(EVC_Alignment_P1, type = "dist", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+
+EVC_Alignment_P1_Similarity_Dist_Summary = as.data.frame(EVC_Alignment_P1_Similarity_Dist)
+colnames(EVC_Alignment_P1_Similarity_Dist_Summary) <- c("Distance")
+
+pdf("EVC_Alignment_P1_Similarity.pdf", height = 4, width = 6)
+
+ggplot(EVC_Alignment_P1_Similarity_Dist_Summary, aes(x = Distance)) +
+  geom_histogram(binwidth = 0.01, fill = "goldenrod", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = 0.13, color = "black", linetype = 2, alpha = 0.2) +
+  geom_vline(xintercept = 0.25, color = "black", linetype = 2) +
+  xlim(-0.01, 0.43) +
+  ylim(0, 3500) +
+  ggtitle("P1") +
+  ylab("Count") +
+  xlab("Distance") +
+  theme_prism()
+
+#dev.off()
+
+name <- rownames(EVC_Alignment_P1_Similarity_Matrix)
+
+EVC_P1_MSD = cbind(name, as.data.frame(cmdscale(EVC_Alignment_P1_Similarity_Matrix))) %>%
+  left_join(EVC_0.95_Types, by = "name")
+
+ggplot(EVC_P1_MSD, aes(x = V1, y = V2, color = type)) +
+  geom_point() +
+  theme_prism()
+```
+
+```{r}
+EVC_Alignment_P2_Similarity_Dist = DistanceMatrix(EVC_Alignment_P2, type = "dist", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+
+EVC_Alignment_P2_Similarity_Dist_Summary = as.data.frame(EVC_Alignment_P2_Similarity_Dist)
+colnames(EVC_Alignment_P2_Similarity_Dist_Summary) <- c("Distance")
+
+pdf("EVC_Alignment_P2_Similarity.pdf", height = 4, width = 6)
+
+ggplot(EVC_Alignment_P2_Similarity_Dist_Summary, aes(x = Distance)) +
+  geom_histogram(binwidth = 0.01, fill = "goldenrod", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = 0.13, color = "black", linetype = 2) +
+  geom_vline(xintercept = 0.25, color = "black", linetype = 2, alpha = 0.2) +
+  xlim(-0.01, 0.43) +
+  ylim(0, 3500) +
+  ggtitle("P2") +
+  ylab("Count") + 
+  xlab("Distance") +
+  theme_prism()
+
+dev.off()
+
+name <- rownames(EVC_Alignment_P2_Similarity_Matrix)
+
+EVC_P2_MSD = cbind(name, as.data.frame(cmdscale(EVC_Alignment_P2_Similarity_Matrix))) %>%
+  left_join(EVC_0.95_Types, by = "name")
+
+ggplot(EVC_P2_MSD, aes(x = V1, y = V2, color = type)) +
+  geom_point() +
+  theme_prism()
+```
+
+```{r}
+EVC_Alignment_P3_Similarity_Dist = DistanceMatrix(EVC_Alignment_P3, type = "dist", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+
+EVC_Alignment_P3_Similarity_Dist_Summary = as.data.frame(EVC_Alignment_P3_Similarity_Dist)
+colnames(EVC_Alignment_P3_Similarity_Dist_Summary) <- c("Distance")
+
+pdf("EVC_Alignment_P3_Similarity.pdf", height = 4, width = 6)
+
+ggplot(EVC_Alignment_P3_Similarity_Dist_Summary, aes(x = Distance)) +
+  geom_histogram(binwidth = 0.01, fill = "goldenrod", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = 0.13, color = "black", linetype = 2) +
+  geom_vline(xintercept = 0.25, color = "black", linetype = 2, alpha = 0.2) +
+  xlim(-0.01, 0.43) +
+  ylim(0, 3500) +
+  ggtitle("P3") +
+  ylab("Count") + 
+  xlab("Distance") +
+  theme_prism()
+
+dev.off()
+
+name <- rownames(EVC_Alignment_P3_Similarity_Matrix)
+
+EVC_P3_MSD = cbind(name, as.data.frame(cmdscale(EVC_Alignment_P3_Similarity_Matrix))) %>%
+  left_join(EVC_0.95_Types, by = "name")
+
+ggplot(EVC_P3_MSD, aes(x = V1, y = V2, color = type)) +
+  geom_point() +
+  theme_prism()
+```
+
+Command line analyses:
+1) Run cd-hit with c = 0.87 on All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_P2.fasta [All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_P2_0.87.fasta]
+2) Run cd-hit with c = 0.87 on All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_P3.fasta [All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_P3_0.87.fasta]
+
+Cluster Network - Type + P2/3 87% Clustering
+```{r}
+EVC_P2_Clusters = read_csv("Clustering_0.95/P1_P2_P3/P2_Clustering/All_Enterovirus_C_ORF_Curated_Sequences_0.95_Trimmed_wDates_P2_0.87.fasta.bak.clstr", col_names = c("Col1", "Col2")) %>%
+  separate(Col1, into = c("P2_Cluster", "Length")) %>%
+  mutate(Accession = substr(Col2, 2, 11)) %>%
+  mutate(Accession = ifelse((Accession == "V01149.1_1" | Accession == "D90457.1_1" | Accession == "K01392.1_1"), Accession, paste0(Accession, "_1"))) %>%
+  select(P2_Cluster, Accession)
+
+EVC_P3_Clusters = read_csv("Clustering_0.95/P1_P2_P3/P3_Clustering/All_Enterovirus_C_ORF_Curated_Sequences_0.95_Trimmed_wDates_P3_0.87.fasta.bak.clstr", col_names = c("Col1", "Col2")) %>%
+  separate(Col1, into = c("P3_Cluster", "Length")) %>%
+  mutate(Accession = substr(Col2, 2, 11)) %>%
+  mutate(Accession = ifelse((Accession == "V01149.1_1" | Accession == "D90457.1_1" | Accession == "K01392.1_1"), Accession, paste0(Accession, "_1"))) %>%
+  select(P3_Cluster, Accession)
+```
+
+```{r}
+EVC_WG_Groups = full_join(EVC_P2_Clusters, EVC_P3_Clusters, by = "Accession") %>%
+  left_join(EVC_0.95_Types, join_by("Accession" == "name")) %>%
+  select(Accession, type, P2_Cluster, P3_Cluster) %>%
+  mutate(WG_Group = paste(type, P2_Cluster, P3_Cluster, sep = " | ")) %>%
+  left_join(EVC_GeoLocations, by = "Accession") %>%
+  separate(Geo_Location, ":", into = c("Geo_Location"))
+
+EVC_WG_Groups_P1_P2 = EVC_WG_Groups %>%
+  select(type, P2_Cluster) %>%
+  mutate(Source = type) %>%
+  mutate(Target = paste0("P2-", P2_Cluster)) %>%
+  group_by(Source, Target) %>%
+  summarise(n = n())
+  
+EVC_WG_Groups_P2_P3 = EVC_WG_Groups %>%
+  select(P2_Cluster, P3_Cluster) %>%
+  mutate(Source = paste0("P2-", P2_Cluster)) %>%
+  mutate(Target = paste0("P3-", P3_Cluster)) %>%
+  group_by(Source, Target) %>%
+  summarise(n = n())
+ 
+EVC_WG_Groups_Network = rbind(EVC_WG_Groups_P1_P2, EVC_WG_Groups_P2_P3) %>%
+  select(Source, Target)
+write_csv(EVC_WG_Groups_Network, "Clustering_0.95/P1_P2_P3/EVC_WG_Groups_Network.csv")
+
+EVC_WG_Groups_P1_Node_Info = EVC_WG_Groups %>%
+  group_by(type) %>%
+  summarise(Count = n(), nLocation = n_distinct(Geo_Location, na.rm = TRUE)) %>%
+  mutate(Node = type) %>%
+  select(Node, Count, nLocation) %>%
+  mutate(Region = "P1")
+
+EVC_WG_Groups_P2_Node_Info = EVC_WG_Groups %>%
+  group_by(P2_Cluster) %>%
+  summarise(Count = n(), nLocation = n_distinct(Geo_Location, na.rm = TRUE)) %>%
+  mutate(Node = paste0("P2-", P2_Cluster)) %>%
+  select(Node, Count, nLocation) %>%
+  mutate(Region = "P2")
+
+EVC_WG_Groups_P3_Node_Info = EVC_WG_Groups %>%
+  group_by(P3_Cluster) %>%
+  summarise(Count = n(), nLocation = n_distinct(Geo_Location, na.rm = TRUE)) %>%
+  mutate(Node = paste0("P3-", P3_Cluster)) %>%
+  select(Node, Count, nLocation) %>%
+  mutate(Region = "P3")
+
+EVC_WG_Groups_Node_Info = rbind(EVC_WG_Groups_P1_Node_Info, EVC_WG_Groups_P2_Node_Info, EVC_WG_Groups_P3_Node_Info) %>%
+  mutate(Species = "EVC") %>%
+  mutate(Color_Indiciator = paste(Species, Region, sep = "-")) %>%
+  mutate(nLocation = ifelse(nLocation == 0, 1, nLocation))
+write_csv(EVC_WG_Groups_Node_Info, "Clustering_0.95/P1_P2_P3/EVC_WG_Groups_Node_Info.csv")
+
+EVC_WG_Groups_Edge_Info = rbind(EVC_WG_Groups_P1_P2, EVC_WG_Groups_P2_P3) %>%
+  ungroup() %>%
+  mutate(Edge_Name = paste0(Source, " (interacts with) ", Target)) %>%
+  select(Edge_Name, n)
+write_csv(EVC_WG_Groups_Edge_Info, "Clustering_0.95/P1_P2_P3/EVC_WG_Groups_Edge_Info.csv")
+```
+
+```{r}
+Type_Code <- c(1:20)
+
+EVC_Types_Code = EVC_WG_Groups %>%
+  distinct(type) %>%
+  arrange(type) %>%
+  cbind(Type_Code)
+
+EVC_WG_Groups_Gathered = EVC_WG_Groups %>%
+  left_join(EVC_Types_Code, by = "type") %>%
+  select(Accession, type, Type_Code, P2_Cluster, P3_Cluster) %>%
+  gather(key = "Region", value = "Cluster", 3:5)
+
+EVC_WG_Groups_Gathered$Region <- factor(EVC_WG_Groups_Gathered$Region, levels = c("Type_Code", "P2_Cluster", "P3_Cluster"))
+
+ggplot(EVC_WG_Groups_Gathered, aes(x = Region, y = Cluster, color = type, group = Accession)) +
+  geom_point() +
+  geom_line() +
+  theme_prism() +
+  theme(legend.position = "none")
+```
+
+Visualize networks in Cytoscape and extract network statistics
+
+Network Statistics
+```{r}
+EVC_Network_Stats = read_csv("Clustering_0.95/P1_P2_P3/EVC_Network_Statistics.csv")  %>%
+  mutate(Dataset = "Without\nVaccine-derived\nSequences")
+
+mean(EVC_Network_Stats$NeighborhoodConnectivity)
+```
+
+#Network construction - w/ vaccine sequences
+P1, P2, + P3 Clusters - BEAST Curated 95% Clustered 
+```{r}
+EVC_Alignment_wVaccine_P1 = subseq(EVC_0.95_Codon_Alignment_wVaccine, 1, 2874)
+EVC_Alignment_wVaccine_P1_Similarity_Matrix = DistanceMatrix(EVC_Alignment_wVaccine_P1, type = "matrix", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+EVC_Alignment_wVaccine_P1_Similarity = as.data.frame(EVC_Alignment_wVaccine_P1_Similarity_Matrix)
+writeXStringSet(EVC_Alignment_wVaccine_P1, "Clustering_0.95/P1_P2_P3/All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_wVaccine_P1.fasta")
+
+EVC_Alignment_wVaccine_P2 = subseq(EVC_0.95_Codon_Alignment_wVaccine, 2875, 4608)
+EVC_Alignment_wVaccine_P2_Similarity_Matrix = DistanceMatrix(EVC_Alignment_wVaccine_P2, type = "matrix", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+EVC_Alignment_wVaccine_P2_Similarity = as.data.frame(EVC_Alignment_wVaccine_P2_Similarity_Matrix)
+writeXStringSet(EVC_Alignment_wVaccine_P2, "Clustering_0.95/P1_P2_P3/All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_wVaccine_P2.fasta")
+
+EVC_Alignment_wVaccine_P3 = subseq(EVC_0.95_Codon_Alignment_wVaccine, 4609, 6798)
+EVC_Alignment_wVaccine_P3_Similarity_Matrix = DistanceMatrix(EVC_Alignment_wVaccine_P3, type = "matrix", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+EVC_Alignment_wVaccine_P3_Similarity = as.data.frame(EVC_Alignment_wVaccine_P3_Similarity_Matrix)
+writeXStringSet(EVC_Alignment_wVaccine_P3, "Clustering_0.95/P1_P2_P3/All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_wVaccine_P3.fasta")
+```
+
+```{r}
+EVC_Alignment_wVaccine_P1_Similarity_Dist = DistanceMatrix(EVC_Alignment_wVaccine_P1, type = "dist", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+
+EVC_Alignment_wVaccine_P1_Similarity_Dist_Summary = as.data.frame(EVC_Alignment_wVaccine_P1_Similarity_Dist)
+colnames(EVC_Alignment_wVaccine_P1_Similarity_Dist_Summary) <- c("Distance")
+
+#pdf("EVC_Alignment_wVaccine_P1_Similarity.pdf", height = 4, width = 6)
+
+ggplot(EVC_Alignment_wVaccine_P1_Similarity_Dist_Summary, aes(x = Distance)) +
+  geom_histogram(binwidth = 0.01, fill = "goldenrod", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = 0.13, color = "black", linetype = 2) +
+  geom_vline(xintercept = 0.25, color = "black", linetype = 2) +
+  xlim(-0.01, 0.43) +
+  #ylim(0, 3500) +
+  ggtitle("P1") +
+  ylab("Count") +
+  xlab("Distance") +
+  theme_prism()
+
+#dev.off()
+
+name <- rownames(EVC_Alignment_wVaccine_P1_Similarity_Matrix)
+
+EVC_wVaccine_P1_MSD = cbind(name, as.data.frame(cmdscale(EVC_Alignment_wVaccine_P1_Similarity_Matrix))) %>%
+  left_join(EVC_0.95_Types, by = "name")
+
+ggplot(EVC_wVaccine_P1_MSD, aes(x = V1, y = V2, color = type)) +
+  geom_point() +
+  theme_prism()
+```
+
+```{r}
+EVC_Alignment_wVaccine_P2_Similarity_Dist = DistanceMatrix(EVC_Alignment_wVaccine_P2, type = "dist", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+
+EVC_Alignment_wVaccine_P2_Similarity_Dist_Summary = as.data.frame(EVC_Alignment_wVaccine_P2_Similarity_Dist)
+colnames(EVC_Alignment_wVaccine_P2_Similarity_Dist_Summary) <- c("Distance")
+
+#pdf("EVC_Alignment_wVaccine_P2_Similarity.pdf", height = 4, width = 6)
+
+ggplot(EVC_Alignment_wVaccine_P2_Similarity_Dist_Summary, aes(x = Distance)) +
+  geom_histogram(binwidth = 0.01, fill = "goldenrod", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = 0.13, color = "black", linetype = 2) +
+  geom_vline(xintercept = 0.25, color = "black", linetype = 2) +
+  xlim(-0.01, 0.43) +
+  #ylim(0, 3500) +
+  ggtitle("P2") +
+  ylab("Count") + 
+  xlab("Distance") +
+  theme_prism()
+
+#dev.off()
+
+name <- rownames(EVC_Alignment_wVaccine_P2_Similarity_Matrix)
+
+EVC_wVaccine_P2_MSD = cbind(name, as.data.frame(cmdscale(EVC_Alignment_wVaccine_P2_Similarity_Matrix))) %>%
+  left_join(EVC_0.95_Types, by = "name")
+
+ggplot(EVC_wVaccine_P2_MSD, aes(x = V1, y = V2, color = type)) +
+  geom_point() +
+  theme_prism()
+```
+
+```{r}
+EVC_Alignment_wVaccine_P3_Similarity_Dist = DistanceMatrix(EVC_Alignment_wVaccine_P3, type = "dist", includeTerminalGaps = FALSE, correction = "none", verbose = TRUE)
+
+EVC_Alignment_wVaccine_P3_Similarity_Dist_Summary = as.data.frame(EVC_Alignment_wVaccine_P3_Similarity_Dist)
+colnames(EVC_Alignment_wVaccine_P3_Similarity_Dist_Summary) <- c("Distance")
+
+#pdf("EVC_Alignment_wVaccine_P3_Similarity.pdf", height = 4, width = 6)
+
+ggplot(EVC_Alignment_wVaccine_P3_Similarity_Dist_Summary, aes(x = Distance)) +
+  geom_histogram(binwidth = 0.01, fill = "goldenrod", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = 0.13, color = "black", linetype = 2) +
+  geom_vline(xintercept = 0.25, color = "black", linetype = 2) +
+  xlim(-0.01, 0.43) +
+  #ylim(0, 3500) +
+  ggtitle("P3") +
+  ylab("Count") + 
+  xlab("Distance") +
+  theme_prism()
+
+#dev.off()
+
+name <- rownames(EVC_Alignment_wVaccine_P3_Similarity_Matrix)
+
+EVC_wVaccine_P3_MSD = cbind(name, as.data.frame(cmdscale(EVC_Alignment_wVaccine_P3_Similarity_Matrix))) %>%
+  left_join(EVC_0.95_Types, by = "name")
+
+ggplot(EVC_wVaccine_P3_MSD, aes(x = V1, y = V2, color = type)) +
+  geom_point() +
+  theme_prism()
+```
+
+Command line analyses:
+1) Run cd-hit with c = 0.87 on All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_P2.fasta [All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_wVaccine_P2_0.87.fasta]
+2) Run cd-hit with c = 0.87 on All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_P3.fasta [All_Enterovirus_C_ORF_Curated_Sequences_0.95_Codon_Aligned_Trimmed_wDates_wVaccine_P3_0.87.fasta]
+
+Cluster Network - Type + P2/3 87% Clustering
+```{r}
+EVC_wVaccine_P2_Clusters = read_csv("Clustering_0.95/P1_P2_P3/P2_Clustering/All_Enterovirus_C_ORF_Curated_Sequences_0.95_Trimmed_wDates_wVaccine_P2_0.87.fasta.bak.clstr", col_names = c("Col1", "Col2")) %>%
+  separate(Col1, into = c("P2_Cluster", "Length")) %>%
+  mutate(Accession = substr(Col2, 2, 11)) %>%
+  mutate(Accession = ifelse((Accession == "V01149.1_1" | Accession == "D90457.1_1" | Accession == "K01392.1_1"), Accession, paste0(Accession, "_1"))) %>%
+  select(P2_Cluster, Accession)
+
+EVC_wVaccine_P3_Clusters = read_csv("Clustering_0.95/P1_P2_P3/P3_Clustering/All_Enterovirus_C_ORF_Curated_Sequences_0.95_Trimmed_wDates_wVaccine_P3_0.87.fasta.bak.clstr", col_names = c("Col1", "Col2")) %>%
+  separate(Col1, into = c("P3_Cluster", "Length")) %>%
+  mutate(Accession = substr(Col2, 2, 11)) %>%
+  mutate(Accession = ifelse((Accession == "V01149.1_1" | Accession == "D90457.1_1" | Accession == "K01392.1_1"), Accession, paste0(Accession, "_1"))) %>%
+  select(P3_Cluster, Accession)
+```
+
+```{r}
+EVC_wVaccine_WG_Groups = full_join(EVC_wVaccine_P2_Clusters, EVC_wVaccine_P3_Clusters, by = "Accession") %>%
+  left_join(EVC_0.95_Types, join_by("Accession" == "name")) %>%
+  select(Accession, type, P2_Cluster, P3_Cluster) %>%
+  mutate(WG_Group = paste(type, P2_Cluster, P3_Cluster, sep = " | ")) %>%
+  left_join(EVC_GeoLocations, by = "Accession") %>%
+  separate(Geo_Location, ":", into = c("Geo_Location"))
+
+EVC_wVaccine_WG_Groups_P1_P2 = EVC_wVaccine_WG_Groups %>%
+  select(type, P2_Cluster) %>%
+  mutate(Source = type) %>%
+  mutate(Target = paste0("P2-", P2_Cluster)) %>%
+  group_by(Source, Target) %>%
+  summarise(n = n())
+  
+EVC_wVaccine_WG_Groups_P2_P3 = EVC_wVaccine_WG_Groups %>%
+  select(P2_Cluster, P3_Cluster) %>%
+  mutate(Source = paste0("P2-", P2_Cluster)) %>%
+  mutate(Target = paste0("P3-", P3_Cluster)) %>%
+  group_by(Source, Target) %>%
+  summarise(n = n())
+ 
+EVC_wVaccine_WG_Groups_Network = rbind(EVC_wVaccine_WG_Groups_P1_P2, EVC_wVaccine_WG_Groups_P2_P3) %>%
+  select(Source, Target)
+write_csv(EVC_wVaccine_WG_Groups_Network, "Clustering_0.95/P1_P2_P3/EVC_wVaccine_WG_Groups_Network.csv")
+
+EVC_wVaccine_WG_Groups_P1_Node_Info = EVC_wVaccine_WG_Groups %>%
+  group_by(type) %>%
+  summarise(Count = n(), nLocation = n_distinct(Geo_Location, na.rm = TRUE)) %>%
+  mutate(Node = type) %>%
+  select(Node, Count, nLocation) %>%
+  mutate(Region = "P1")
+
+EVC_wVaccine_WG_Groups_P2_Node_Info = EVC_wVaccine_WG_Groups %>%
+  group_by(P2_Cluster) %>%
+  summarise(Count = n(), nLocation = n_distinct(Geo_Location, na.rm = TRUE)) %>%
+  mutate(Node = paste0("P2-", P2_Cluster)) %>%
+  select(Node, Count, nLocation) %>%
+  mutate(Region = "P2")
+
+EVC_wVaccine_WG_Groups_P3_Node_Info = EVC_wVaccine_WG_Groups %>%
+  group_by(P3_Cluster) %>%
+  summarise(Count = n(), nLocation = n_distinct(Geo_Location, na.rm = TRUE)) %>%
+  mutate(Node = paste0("P3-", P3_Cluster)) %>%
+  select(Node, Count, nLocation) %>%
+  mutate(Region = "P3")
+
+EVC_wVaccine_WG_Groups_Node_Info = rbind(EVC_wVaccine_WG_Groups_P1_Node_Info, EVC_wVaccine_WG_Groups_P2_Node_Info, EVC_wVaccine_WG_Groups_P3_Node_Info) %>%
+  mutate(Species = "EVC") %>%
+  mutate(Color_Indiciator = paste(Species, Region, sep = "-")) %>%
+  mutate(nLocation = ifelse(nLocation == 0, 1, nLocation))
+write_csv(EVC_wVaccine_WG_Groups_Node_Info, "Clustering_0.95/P1_P2_P3/EVC_wVaccine_WG_Groups_Node_Info.csv")
+
+EVC_wVaccine_WG_Groups_Edge_Info = rbind(EVC_wVaccine_WG_Groups_P1_P2, EVC_wVaccine_WG_Groups_P2_P3) %>%
+  ungroup() %>%
+  mutate(Edge_Name = paste0(Source, " (interacts with) ", Target)) %>%
+  select(Edge_Name, n)
+write_csv(EVC_wVaccine_WG_Groups_Edge_Info, "Clustering_0.95/P1_P2_P3/EVC_wVaccine_WG_Groups_Edge_Info.csv")
+```
+
+```{r}
+Type_Code <- c(1:20)
+
+EVC_Types_Code = EVC_WG_Groups %>%
+  distinct(type) %>%
+  arrange(type) %>%
+  cbind(Type_Code)
+
+EVC_wVaccine_WG_Groups_Gathered = EVC_wVaccine_WG_Groups %>%
+  left_join(EVC_Types_Code, by = "type") %>%
+  select(Accession, type, Type_Code, P2_Cluster, P3_Cluster) %>%
+  gather(key = "Region", value = "Cluster", 3:5)
+
+EVC_wVaccine_WG_Groups_Gathered$Region <- factor(EVC_wVaccine_WG_Groups_Gathered$Region, levels = c("Type_Code", "P2_Cluster", "P3_Cluster"))
+
+ggplot(EVC_wVaccine_WG_Groups_Gathered, aes(x = Region, y = Cluster, color = type, group = Accession)) +
+  geom_point() +
+  geom_line() +
+  theme_prism() +
+  theme(legend.position = "none")
+```
+
+Visualize networks in Cytoscape and extract network statistics
+
+Network Statistics
+```{r}
+EVC_wVaccine_Network_Stats = read_csv("Clustering_0.95/P1_P2_P3/EVC_wVaccine_Network_Statistics.csv") %>%
+  mutate(Dataset = "With\nVaccine-derived\nSequences")
+
+mean(EVC_wVaccine_Network_Stats$NeighborhoodConnectivity)
+median(EVC_wVaccine_Network_Stats$NeighborhoodConnectivity)
+```
+
+Network Statistics Comparison: with + without vaccine sequences
+```{r}
+EVC_Network_Stats_Comparison = rbind(EVC_Network_Stats, EVC_wVaccine_Network_Stats)
+
+EVC_Network_Stats_Comparison$Dataset <- factor(EVC_Network_Stats_Comparison$Dataset, levels = c("Without\nVaccine-derived\nSequences", "With\nVaccine-derived\nSequences"))
+
+pdf("EVC_Network_Stats_Comparison.pdf", height = 7, width = 4)
+
+ggplot(EVC_Network_Stats_Comparison, aes(x = Dataset, y = NeighborhoodConnectivity)) +
+  stat_compare_means(label.x = 0.8, label.y = 22) +
+  geom_boxplot_pattern(fill = "goldenrod", aes(pattern = Dataset), pattern_color = "white", pattern_fill = "white", pattern_alpha = 1, pattern_angle = 45, pattern_spacing = 0.04, pattern_size = 0.1) +
+  scale_pattern_manual(values = c(`With\nVaccine-derived\nSequences` = "stripe", `Without\nVaccine-derived\nSequences` = "none")) +
+  theme_prism() +
+  xlab("") +
+  ylab("Neighborhood Connectivity") +
+  theme(legend.position = "none", axis.text.x = element_text(size = 12))
+
+dev.off()
+```
+
+Network Statistics Comparison: with + without vaccine sequences by 3Dpol group
+```{r}
+EVC_PolGroup_I_Network_Statistics = read_csv("Clustering_0.95/P1_P2_P3/EVC_PolGroup_I_Network_Statistics.csv") %>%
+  select(Species, name, NeighborhoodConnectivity) %>%
+  mutate(PolGroup = "I") %>%
+  mutate(Dataset = "No")
+EVC_PolGroup_II_Network_Statistics = read_csv("Clustering_0.95/P1_P2_P3/EVC_PolGroup_II_Network_Statistics.csv") %>%
+  select(Species, name, NeighborhoodConnectivity) %>%
+  mutate(PolGroup = "II") %>%
+  mutate(Dataset = "No")
+EVC_PolGroup_III_Network_Statistics = read_csv("Clustering_0.95/P1_P2_P3/EVC_PolGroup_III_Network_Statistics.csv") %>%
+  select(Species, name, NeighborhoodConnectivity) %>%
+  mutate(PolGroup = "III") %>%
+  mutate(Dataset = "No")
+EVC_PolGroup_IV_Network_Statistics = read_csv("Clustering_0.95/P1_P2_P3/EVC_PolGroup_IV_Network_Statistics.csv") %>%
+  select(Species, name, NeighborhoodConnectivity) %>%
+  mutate(PolGroup = "IV") %>%
+  mutate(Dataset = "No")
+
+EVC_wVaccine_PolGroup_I_Network_Statistics = read_csv("Clustering_0.95/P1_P2_P3/EVC_wVaccine_PolGroup_I_Network_Statistics.csv") %>%
+  select(Species, name, NeighborhoodConnectivity) %>%
+  mutate(PolGroup = "I") %>%
+  mutate(Dataset = "Yes")
+EVC_wVaccine_PolGroup_II_Network_Statistics = read_csv("Clustering_0.95/P1_P2_P3/EVC_wVaccine_PolGroup_II_Network_Statistics.csv") %>%
+  select(Species, name, NeighborhoodConnectivity) %>%
+  mutate(PolGroup = "II") %>%
+  mutate(Dataset = "Yes")
+EVC_wVaccine_PolGroup_III_Network_Statistics = read_csv("Clustering_0.95/P1_P2_P3/EVC_wVaccine_PolGroup_III_Network_Statistics.csv") %>%
+  select(Species, name, NeighborhoodConnectivity) %>%
+  mutate(PolGroup = "III") %>%
+  mutate(Dataset = "Yes")
+EVC_wVaccine_PolGroup_IV_Network_Statistics = read_csv("Clustering_0.95/P1_P2_P3/EVC_wVaccine_PolGroup_IV_Network_Statistics.csv") %>%
+  select(Species, name, NeighborhoodConnectivity) %>%
+  mutate(PolGroup = "IV") %>%
+  mutate(Dataset = "Yes")
+
+EVC_PolGroup_Network_Stats_Comparison = rbind(EVC_PolGroup_I_Network_Statistics, EVC_PolGroup_II_Network_Statistics, EVC_PolGroup_III_Network_Statistics, EVC_PolGroup_IV_Network_Statistics, EVC_wVaccine_PolGroup_I_Network_Statistics, EVC_wVaccine_PolGroup_II_Network_Statistics, EVC_wVaccine_PolGroup_III_Network_Statistics, EVC_wVaccine_PolGroup_IV_Network_Statistics)
+```
+
+```{r}
+EVC_PolGroup_Network_Stats_Comparison$Dataset = factor(EVC_PolGroup_Network_Stats_Comparison$Dataset, levels = c("No", "Yes"))
+
+pdf("EVC_PolGroup_Network_Stats_Comparison.pdf", height = 4, width = 10)
+
+ggplot(EVC_PolGroup_Network_Stats_Comparison, aes(x = Dataset, y = NeighborhoodConnectivity, fill = PolGroup)) +
+  geom_boxplot_pattern(aes(pattern = Dataset), color = "black", pattern_color = "white", pattern_fill = "white", pattern_alpha = 1, pattern_angle = 45, pattern_spacing = 0.04, pattern_size = 0.1) +
+  scale_pattern_manual(values = c(`Yes` = "stripe", `No` = "none")) +
+  scale_fill_manual(values = c("#f7020295", "#02f70a95", "#f7df0295", "#0213f795")) +
+  theme_prism() +
+  xlab("Inclusion of Vaccine-derived Sequences") +
+  ylab("Neighborhood Connectivity") +
+  theme(legend.position = "none", axis.text.x = element_text(size = 12), axis.title.x = ggtext::element_markdown()) +
+  facet_wrap(~PolGroup, nrow = 1)
+
+dev.off()
+```
+
+#SSE + TreeOrderScan
+
+Command line analyses:
+1) Reduce data to a managable amount for TreeOrderScan by subclustering at 98% on the amino acid sequences in All_Enterovirus_C_ORF_Curated_Sequences_Trimmed_CompleteSeqs_0.95_AA.fasta using cd-hit (c = 0.98) [All_Enterovirus_C_ORF_Curated_Sequences_Trimmed_CompleteSeqs_0.95_AA_0.98.fasta]
+
+Add information to sequence names for parsing in SSE
+```{r}
+EVC_0.95_AA_0.98_Clusters = readAAStringSet("Clustering_0.95/Clustering_0.98/All_Enterovirus_C_ORF_Curated_Sequences_Trimmed_CompleteSeqs_0.95_woVaccine_AA_0.98.fasta")
+
+Accession <- substr(names(EVC_0.95_AA_0.98_Clusters), 1, nchar(names(EVC_0.95_AA_0.98_Clusters)) - 2)
+
+EVC_0.95_AA_0.98_ORFs = EVC_ORFs_Complete_Sequences[names(EVC_ORFs_Complete_Sequences) %in% Accession]
+
+EVC_0.95_AA_0.98_names = as.data.frame(Accession) %>%
+  left_join(EVC_WG_Groups, join_by("Accession")) %>%
+  select(Accession, WG_Group) %>%
+  mutate(name = paste(Accession, WG_Group, sep = " | "))
+
+for (i in 1:length(EVC_0.95_AA_0.98_ORFs)) {
+  names(EVC_0.95_AA_0.98_ORFs)[names(EVC_0.95_AA_0.98_ORFs) == EVC_0.95_AA_0.98_names$Accession[i]] <- EVC_0.95_AA_0.98_names$name[i]
+}
+
+writeXStringSet(EVC_0.95_AA_0.98_ORFs, "Clustering_0.95/Clustering_0.98/All_Enterovirus_C_ORF_Curated_Sequences_Trimmed_CompleteSeqs_0.95_woVaccine_AA_0.98_SSEnames.fasta")
+```
+
+Randomly select 50 sequences from the curated 95% clustered dataset for SSE
+```{r}
+set.seed(924)
+
+EVC_SSE_Sample50 = sample(names(EVC_0.95_Codon_Alignment), 50)
+
+EVC_0.95_ORFs_Sample50 = EVC_ORFs_Complete_Sequences[names(EVC_ORFs_Complete_Sequences) %in% EVC_SSE_Sample50]
+
+EVC_SSE_Sample50_names = as.data.frame(EVC_SSE_Sample50) %>%
+  dplyr::rename(Accession = EVC_SSE_Sample50) %>%
+  left_join(EVC_WG_Groups, join_by("Accession")) %>%
+  select(Accession, WG_Group) %>%
+  mutate(name = paste(Accession, WG_Group, sep = " | "))
+
+for (i in 1:length(EVC_0.95_ORFs_Sample50)) {
+  names(EVC_0.95_ORFs_Sample50)[names(EVC_0.95_ORFs_Sample50) == EVC_SSE_Sample50_names$Accession[i]] <- EVC_SSE_Sample50_names$name[i]
+}
+
+writeXStringSet(EVC_0.95_ORFs_Sample50, "Clustering_0.95/SSE_Sample_50/All_Enterovirus_C_ORF_Curated_Sequences_Trimmed_CompleteSeqs_0.95_Sample50_SSEnames.fasta")
+```
+
+Run TreeOrderScan in SSE with the following parameters:
+1) Number of bootstraps: 100
+2) Bootstrap threshold: 70
+3) Length of fragment: 200
+4) Increment between fragments: 100
+5) Group size reporting threshold: 1
+
+Phylogenetic compatibility matrix
+```{r}
+EVC_TOS_ViolationList =  read_tsv("Clustering_0.95/Clustering_0.98/Enterovirus_C.Violation_List.DAT") %>%
+  filter(Pos_1 != 6612)
+
+pal <- wes_palette("Zissou1", 100, type = "continuous")
+
+pdf("EVC_TOS_Compatibility_Matrix_AG.pdf", width = 4, height = 4)
+
+ggplot(EVC_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `AG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 4)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Enterovirus C") +
+  theme_prism() +
+  theme(legend.position = "none")
+
+dev.off()
+
+pdf("TOS_Compatibility_Matrix_AG_LEGEND.pdf", width = 4, height = 5)
+
+ggplot(EVC_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `AG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 4), name = "Violations \nper Clade\n") +
+  xlab("") +
+  ylab("") +
+  theme_prism() +
+  theme(legend.title = element_text(), legend.title.align=0.5)
+
+dev.off()
+
+pdf("EVC_TOS_Compatibility_Matrix_BG.pdf", width = 4, height = 4)
+
+ggplot(EVC_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `BG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 2), name = "Violations \nper Clade\n") +
+  xlab("") +
+  ylab("") +
+  ggtitle("Enterovirus C") +
+  theme_prism() +
+  theme(legend.position = "none")
+
+dev.off()
+
+pdf("TOS_Compatibility_Matrix_BG_LEGEND.pdf", width = 4, height = 5)
+
+ggplot(EVC_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `BG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 2), name = "Violations \nper Clade\n") +
+  xlab("") +
+  ylab("") +
+  theme_prism() +
+  theme(legend.title = element_text(), legend.title.align=0.5)
+
+dev.off()
+
+pdf("EVC_TOS_Compatibility_Matrix_WG.pdf", width = 4, height = 4)
+
+ggplot(EVC_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `WG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 0.75), name = "Violations \nper Clade\n") +
+  xlab("") +
+  ylab("") +
+  ggtitle("Enterovirus C") +
+  theme_prism() +
+  theme(legend.position = "none")
+
+dev.off()
+
+pdf("TOS_Compatibility_Matrix_WG_LEGEND.pdf", width = 4, height = 5)
+
+ggplot(EVC_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `WG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 0.75), name = "Violations \nper Clade\n") +
+  xlab("") +
+  ylab("") +
+  theme_prism() +
+  theme(legend.title = element_text(), legend.title.align=0.5)
+
+dev.off()
+```
+
+```{r}
+EVC_TOS_ViolationFreq =  read_tsv("Clustering_0.95/Clustering_0.98/Enterovirus_C_Tagged.Violation_Freq.DAT")
+```
+
+Phylogenetic compatibility matrix - 50 samples
+```{r}
+EVC_50_TOS_ViolationList =  read_tsv("Clustering_0.95/Enterovirus_C.Violation_List.DAT") %>%
+  filter(Pos_1 != 6654)
+
+pal <- wes_palette("Zissou1", 100, type = "continuous")
+
+pdf("EVC_50_TOS_Compatibility_Matrix_AG.pdf", width = 4, height = 4)
+
+ggplot(EVC_50_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `AG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 4)) +
+  xlab("") +
+  ylab("") +
+  ggtitle("Enterovirus C") +
+  theme_prism() +
+  theme(legend.position = "none")
+
+dev.off()
+
+pdf("TOS_50_Compatibility_Matrix_AG_LEGEND.pdf", width = 4, height = 5)
+
+ggplot(EVC_50_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `AG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 4), name = "Violations \nper Clade\n") +
+  xlab("") +
+  ylab("") +
+  theme_prism() +
+  theme(legend.title = element_text(), legend.title.align=0.5)
+
+dev.off()
+
+pdf("EVC_50_TOS_Compatibility_Matrix_BG.pdf", width = 4, height = 4)
+
+ggplot(EVC_50_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `BG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 1.75), name = "Violations \nper Clade\n") +
+  xlab("") +
+  ylab("") +
+  ggtitle("Enterovirus C") +
+  theme_prism() +
+  theme(legend.position = "none")
+
+dev.off()
+
+pdf("TOS_Compatibility_Matrix_BG_LEGEND.pdf", width = 4, height = 5)
+
+ggplot(EVC_50_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `BG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 1.75), name = "Violations \nper Clade\n") +
+  xlab("") +
+  ylab("") +
+  theme_prism() +
+  theme(legend.title = element_text(), legend.title.align=0.5)
+
+dev.off()
+
+pdf("EVC_50_TOS_Compatibility_Matrix_WG.pdf", width = 4, height = 4)
+
+ggplot(EVC_50_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `WG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 0.5), name = "Violations \nper Clade\n") +
+  xlab("") +
+  ylab("") +
+  ggtitle("Enterovirus C") +
+  theme_prism() +
+  theme(legend.position = "none")
+
+dev.off()
+
+pdf("TOS_Compatibility_Matrix_WG_LEGEND.pdf", width = 4, height = 5)
+
+ggplot(EVC_50_TOS_ViolationList, aes(x = Pos_1, y = Pos_2, fill = `WG/clade`)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = pal, limits = c(0, 0.5), name = "Violations \nper Clade\n") +
+  xlab("") +
+  ylab("") +
+  theme_prism() +
+  theme(legend.title = element_text(), legend.title.align=0.5)
+
+dev.off()
+```
+
+```{r}
+EVC_50_TOS_ViolationFreq =  read_tsv("Clustering_0.95/Enterovirus_C.Violation_Freq.DAT")
+```
+
+#RDP4 Results to prep for BEAST
+
+Run RDP4 on All_Enterovirus_C_ORF_Curated_Sequences_Trimmed_CompleteSeqs_0.95_AA_0.98_Aligned_SSEnames.fasta, then download the alignment without recombinant regions [All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions.fas]
+
+Extract 3D sequence
+```{r}
+EVC_0.95_AA_0.98_NoRecombinantRegions_Outgroup = readDNAStringSet("Clustering_0.95/Clustering_0.98/All_Enterovirus_C_0.95_AA_0.98_Outgroup_RDP4_NoRecombinantRegions.fas")
+
+EVC_0.95_AA_0.98_NoRecombinantRegions_Outgroup_3D = subseq(EVC_0.95_AA_0.98_NoRecombinantRegions_Outgroup, 5371, 6759)
+EVC_0.95_AA_0.98_NoRecombinantRegions_3D = EVC_0.95_AA_0.98_NoRecombinantRegions_Outgroup_3D[names(EVC_0.95_AA_0.98_NoRecombinantRegions_Outgroup_3D) != "FJ445111.1_1 | Rhinovirus A1"]
+writeXStringSet(EVC_0.95_AA_0.98_NoRecombinantRegions_3D, "Clustering_0.95/Clustering_0.98/3D_tMRCA/All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D.fasta")
+
+Accession = names(EVC_0.95_AA_0.98_NoRecombinantRegions_3D)
+Sequences = as.character(EVC_0.95_AA_0.98_NoRecombinantRegions_3D)
+
+EVC_0.95_AA_0.98_NoRecombinantRegions_3D_DF = as.data.frame(cbind(Accession, Sequences)) %>%
+  mutate(Gap_Count = str_count(Sequences, "-")) %>%
+  mutate(Gap_Frequency = Gap_Count/width(EVC_0.95_AA_0.98_NoRecombinantRegions_3D)[1])
+
+EVC_0.95_AA_0.98_NoRecombinantRegions_3D_DF_Reduced = EVC_0.95_AA_0.98_NoRecombinantRegions_3D_DF %>%
+  filter(Gap_Frequency < 0.1) %>%
+  mutate(Accession_1 = Accession) %>%
+  separate(Accession_1, c("Name"), " | ") %>%
+  select(Accession, Name, Sequences) 
+
+EVC_0.95_AA_0.98_NoRecombinantRegions_3D_DF_Reduced_Dates = EVC_0.95_AA_0.98_NoRecombinantRegions_3D_DF_Reduced %>% 
+  select(Name) %>%
+  left_join(EVC_Dates, join_by("Name" == "Accession")) %>%
+  select(Name, BEAST_Date)
+
+write_tsv(EVC_0.95_AA_0.98_NoRecombinantRegions_3D_DF_Reduced_Dates, "Clustering_0.95/Clustering_0.98/3D_tMRCA/Curated_EVC_3D_Sequence_Info_Complete_Dates.tsv")
+
+EVC_0.95_AA_0.98_NoRecombinantRegions_3D_Reduced = DNAStringSet(EVC_0.95_AA_0.98_NoRecombinantRegions_3D_DF_Reduced$Sequences)
+names(EVC_0.95_AA_0.98_NoRecombinantRegions_3D_Reduced) <- EVC_0.95_AA_0.98_NoRecombinantRegions_3D_DF_Reduced$Name
+
+writeXStringSet(EVC_0.95_AA_0.98_NoRecombinantRegions_3D_Reduced, "Clustering_0.95/Clustering_0.98/3D_tMRCA/All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions_3D_Reduced.fasta")
+```
+
+Extract 3D-linked VP1 sequences
+```{r}
+Accessions <- EVC_0.95_AA_0.98_NoRecombinantRegions_3D_DF_Reduced$Name
+
+EVC_0.95_AA_0.98_ORFs_Codon_Aligned = EVC_0.95_Codon_Alignment[names(EVC_0.95_Codon_Alignment) %in% Accessions]
+EVC_0.95_AA_0.98_ORFs_Codon_Aligned_VP1 = subseq(EVC_0.95_AA_0.98_ORFs_Codon_Aligned, 1834, 2874)
+
+writeXStringSet(EVC_0.95_AA_0.98_ORFs_Codon_Aligned_VP1, "Clustering_0.95/Clustering_0.98/VP1_tMRCA/All_Enterovirus_C_0.95_AA_0.98_RDP4_NoRecombinantRegions_Reduced_VP1.fasta")
+```
+
+#BEAST (tMRCA)
+
+Extract VP1 sequences for BEAST
+```{r}
+EVC_0.95_Codon_Alignment_VP1 = subseq(EVC_0.95_Codon_Alignment, 1834, 2874)
+writeXStringSet(EVC_0.95_Codon_Alignment_VP1, "Clustering_0.95/VP1_tMRCA/All_Enterovirus_C_ORF_Curated_Sequences_Codon_Aligned_Trimmed_CompleteSeqs_0.95_VP1.fasta")
+```
+
+Tree Statistics
+```{r}
+EVC_VP1_Tree = read.nexus("Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined_VP1.trees")
+EVC_3D_Tree = read.nexus("Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined_3D.trees")
+
+EVC_TreeStats = NULL
+
+for(i in 1:length(EVC_VP1_Tree)) {
+  TEMP_VP1_Treeness = treeness(EVC_VP1_Tree[[i]])
+  TEMP_3D_Treeness = treeness(EVC_3D_Tree[[i]])
+  
+  TEMP_RF_Distance = RF.dist(EVC_VP1_Tree[[i]], EVC_3D_Tree[[i]], check.labels = TRUE, rooted = TRUE, normalize = TRUE)
+  
+  TEMP_TreeStats = as.data.frame(cbind(i, TEMP_VP1_Treeness, TEMP_3D_Treeness, TEMP_RF_Distance))
+  
+  EVC_TreeStats = rbind(EVC_TreeStats, TEMP_TreeStats)
+}
+
+colnames(EVC_TreeStats) <- c("Run", "VP1_Treeness", "3D_Treeness", "RF_Distance")
+
+write_csv(EVC_TreeStats, "EVC_Tree_Statistics.csv")
+```
+
+Tanglegram
+```{r}
+EVC_VP1_MCC_Tree = read.nexus("Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined_VP1.mcc.trees")
+EVC_3D_MCC_Tree = read.nexus("Clustering_0.95/Clustering_0.98/VP1_3D_BEAST/BEAST_Partitioned_RootHeightLN2.0_Runs_Combined_3D.mcc.trees")
+
+EVC_VP1_Tree_Dend <- ladder(as.dendrogram(EVC_VP1_MCC_Tree))
+EVC_3D_Tree_Dend <- ladder(as.dendrogram(EVC_3D_MCC_Tree))
+
+set.seed(3954)
+EVC_Palette <- createPalette(20, c("#DAA520"), M=1000)
+swatch(EVC_Palette)
+EVC_Type_Colors = cbind(EVC_0.95_Types_Summary, EVC_Palette) %>%
+  select(type, EVC_Palette)
+
+name <- labels(EVC_VP1_Tree_Dend)
+EVC_0.95_AA_0.98_Type_Colors = as.data.frame(name) %>%
+  left_join(EVC_0.95_Types, by = "name") %>%
+  left_join(EVC_Type_Colors, by = "type") %>%
+  select(name, EVC_Palette)
+
+labels_colors(EVC_VP1_Tree_Dend) <- EVC_0.95_AA_0.98_Type_Colors$EVC_Palette
+
+name <- labels(EVC_3D_Tree_Dend)
+EVC_0.95_AA_0.98_Type_Colors = as.data.frame(name) %>%
+  left_join(EVC_0.95_Types, by = "name") %>%
+  left_join(EVC_Type_Colors, by = "type") %>%
+  select(name, EVC_Palette)
+
+labels_colors(EVC_3D_Tree_Dend) <- EVC_0.95_AA_0.98_Type_Colors$EVC_Palette
+
+EVC_tanglegram = untangle(EVC_VP1_Tree_Dend, EVC_3D_Tree_Dend, method = "stepBothSides") %>%
+  tanglegram(highlight_distinct_edges = TRUE, highlight_branches_lwd = FALSE, margin_inner = 7, lwd = 2)
+
+name <- labels(EVC_tanglegram$dend1)
+EVC_0.95_AA_0.98_Type_Colors_New_Dend1 = as.data.frame(name) %>%
+  left_join(EVC_0.95_Types, by = "name") %>%
+  left_join(EVC_Type_Colors, by = "type") %>%
+  select(name, EVC_Palette)
+
+name <- labels(EVC_tanglegram$dend2)
+EVC_0.95_AA_0.98_Type_Colors_New_Dend2 = as.data.frame(name) %>%
+  left_join(EVC_0.95_Types, by = "name") %>%
+  left_join(EVC_Type_Colors, by = "type") %>%
+  select(name, EVC_Palette)
+
+EVC_tanglegram_colored = untangle(EVC_VP1_Tree_Dend, EVC_3D_Tree_Dend, method = "stepBothSides") %>%
+  tanglegram(highlight_distinct_edges = TRUE, highlight_branches_lwd = FALSE, margin_inner = 7, lwd = 2, color_lines = EVC_0.95_AA_0.98_Type_Colors_New_Dend1$EVC_Palette, columns_width = c(8.92, 4, 7.15))
+
+EVC_tanglegram_colored$dend1 = EVC_tanglegram_colored$dend1 %>%
+  set("leaves_pch", 21) %>%
+  set("leaves_cex", 2) %>%
+  set("leaves_col", "#000000") %>%
+  set("leaves_bg", EVC_0.95_AA_0.98_Type_Colors_New_Dend1$EVC_Palette) %>%
+  set("labels_col", "#FFFFFF")
+
+EVC_tanglegram_colored$dend2 = EVC_tanglegram_colored$dend2 %>%
+  set("leaves_pch", 21) %>%
+  set("leaves_cex", 2) %>%
+  set("leaves_col", "#000000") %>%
+  set("leaves_bg", EVC_0.95_AA_0.98_Type_Colors_New_Dend2$EVC_Palette) %>%
+  set("labels_col", "#FFFFFF")
+
+pdf("EVC_Tanglegram.pdf", width = 9.8, height = 10.58)
+
+plot(EVC_tanglegram_colored, highlight_distinct_edges = TRUE, edge.lwd = 2, margin_inner = 0, lwd = 2, color_lines = EVC_0.95_AA_0.98_Type_Colors_New_Dend1$EVC_Palette, columns_width = c(8.92, 4, 7.15), xaxs = "r", left_dendo_mar = c(2.5, 0.5, 3, 0), right_dendo_mar = c(2.5, 0.2, 3, 0.5))
+
+dev.off()
+```
+
+LTT + GTT
+```{r}
+EVC_VP1_Tree_Ultra = force.ultrametric(EVC_VP1_MCC_Tree, method = "nnls")
+EVC_3D_Tree_Ultra = force.ultrametric(EVC_3D_MCC_Tree, method = "nnls")
+
+ltt(EVC_VP1_Tree_Ultra, log = TRUE)
+lines(c(0, max(nodeHeights(EVC_VP1_Tree_Ultra))), c(log(2), log(length(EVC_VP1_Tree_Ultra$tip.label))),lty = "dashed", lwd = 2, col = "red")
+
+ltt(EVC_VP1_MCC_Tree)
+
+EVC_VP1_gtt = gtt(EVC_VP1_Tree_Ultra)
+plot(EVC_VP1_gtt)
+
+ltt(EVC_3D_Tree_Ultra, log = TRUE)
+lines(c(0, max(nodeHeights(EVC_3D_Tree_Ultra))), c(log(2), log(length(EVC_3D_Tree_Ultra$tip.label))),lty = "dashed", lwd = 2, col = "red")
+
+ltt(EVC_3D_MCC_Tree)
+
+EVC_3D_gtt = gtt(EVC_3D_Tree_Ultra)
+plot(EVC_3D_gtt)
+```
+
+ltt
+```{r}
+EVC_VP1_LTT = ltt(EVC_VP1_MCC_Tree)
+EVC_3D_LTT = ltt(EVC_3D_MCC_Tree)
+
+EVC_VP1_LTT_DF = as.data.frame(cbind(EVC_VP1_LTT[[1]], EVC_VP1_LTT[[2]]))
+colnames(EVC_VP1_LTT_DF) <- c("Lineages", "Time")
+
+EVC_3D_LTT_DF = as.data.frame(cbind(EVC_3D_LTT[[1]], EVC_3D_LTT[[2]]))
+colnames(EVC_3D_LTT_DF) <- c("Lineages", "Time")
+
+EVC_Delta = max(EVC_VP1_LTT_DF$Time) - max(EVC_3D_LTT_DF$Time)
+
+ggplot() +
+  geom_line(aes(x = c(0, max(nodeHeights(EVC_VP1_MCC_Tree))), y = c(log(2), log(length(EVC_VP1_MCC_Tree$tip.label)))), color = "goldenrod", linetype = 2, alpha = 0.5) +
+  geom_line(aes(x = c(0 + EVC_Delta, max(nodeHeights(EVC_3D_MCC_Tree)) + EVC_Delta), y = c(log(2), log(length(EVC_3D_MCC_Tree$tip.label)))), color = "lemonchiffon2", linetype = 2, alpha = 0.9) +
+  geom_step(data = EVC_VP1_LTT_DF, aes(x = Time, y = log(Lineages)), color = "goldenrod", linewidth = 0.75) +
+  geom_step(data = EVC_3D_LTT_DF, aes(x = Time + EVC_Delta, y = log(Lineages)), color = "lemonchiffon2", linewidth = 0.75) +
+  ylab("Log Lineages") +
+  xlab("Time From Root") +
+  theme_prism()
+```
+
+gtt
+```{r}
+EVC_VP1_GTT = gtt(EVC_VP1_MCC_Tree)
+EVC_3D_GTT = gtt(EVC_3D_MCC_Tree)
+
+EVC_VP1_GTT_DF = as.data.frame(cbind(EVC_VP1_GTT[[1]], EVC_VP1_GTT[[2]]))
+colnames(EVC_VP1_GTT_DF) <- c("Time", "Gamma")
+
+EVC_3D_GTT_DF = as.data.frame(cbind(EVC_3D_GTT[[1]], EVC_3D_GTT[[2]]))
+colnames(EVC_3D_GTT_DF) <- c("Time", "Gamma")
+
+EVC_Delta = max(EVC_VP1_GTT_DF$Time) - max(EVC_3D_GTT_DF$Time)
+
+#pdf("EVC_GTT.pdf", height = 3, width = 5)
+
+ggplot() +
+  geom_hline(aes(yintercept = 0), linetype = 2, color = "lightgrey") +
+  geom_step(data = EVC_VP1_GTT_DF, aes(x = Time, y = Gamma), color = "goldenrod", linewidth = 0.75) +
+  geom_step(data = EVC_3D_GTT_DF, aes(x = Time + EVC_Delta, y = Gamma), color = "lemonchiffon2", linewidth = 0.75) +
+  ylab("Gamma") +
+  xlab("Time From Root") +
+  theme_prism()
+
+#dev.off()
+```

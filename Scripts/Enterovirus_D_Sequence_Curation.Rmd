@@ -1,0 +1,110 @@
+---
+title: "Enterovirus_D_Sequence_Curation"
+output: html_document
+date: "2025-08-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+```
+
+Prior data collection + cleaning steps:
+1) Download all Enterovirus D sequences and their metadata from NCBI Virus [All_Enterovirus_D.fasta, All_Enterovirus_D.csv]
+2) Remove sequences with two or more consecutive ambiguous nucleotides (N's) in a row [All_Enterovirus_D_Curated_Sequences.fasta]
+3) Identify and extract ORFs longer than 6000 nt with EMBOSS [All_Enterovirus_D_ORF_Curated_Sequences_Short_Names.fasta]
+4) Codon align ORFs with RevTrans 2.0 (MAFFT) [All_Enterovirus_D_ORF_Curated_Sequences_Codon_Aligned.fasta]
+
+#Read in data
+```{r}
+EVD_Info = read_csv("../All_Enterovirus_D.csv")
+
+EVD_ORFs = readDNAStringSet("All_Enterovirus_D_ORF_Curated_Sequences_Short_Names.fasta")
+EVD_Codon_Alignment = readDNAStringSet("All_Enterovirus_D_ORF_Curated_Sequences_Codon_Aligned.fasta")
+
+#Remove extra space added at the end of each sequence name
+names(EVD_Codon_Alignment) <- substr(names(EVD_Codon_Alignment), 1, nchar(names(EVD_Codon_Alignment)) - 1)
+```
+
+#Trim alignment to polyprotein ORF + remove truncated sequences
+```{r}
+EVD_Codon_Alignment_Trimmed = subseq(EVD_Codon_Alignment, 10, 6597)
+
+EVD_End_Sequence = substr(EVD_Codon_Alignment_Trimmed, width(EVD_Codon_Alignment_Trimmed)[1] - 4, width(EVD_Codon_Alignment_Trimmed)[1])
+Accession <- names(EVD_End_Sequence)
+
+EVD_Truncated_Sequences = as.data.frame(cbind(Accession, EVD_End_Sequence)) %>%
+  filter(EVD_End_Sequence == "-----")
+
+`%ni%` <- Negate(`%in%`)
+
+EVD_ORFs_Complete_Sequences = EVD_ORFs[names(EVD_ORFs) %ni% EVD_Truncated_Sequences$Accession]
+writeXStringSet(EVD_ORFs_Complete_Sequences, "All_Enterovirus_D_ORF_Curated_Sequences_Trimmed_CompleteSeqs.fasta")
+
+EVD_Codon_Alignment_Complete_Sequences = EVD_Codon_Alignment_Trimmed[names(EVD_Codon_Alignment_Trimmed) %ni% EVD_Truncated_Sequences$Accession]
+writeXStringSet(EVD_Codon_Alignment_Complete_Sequences, "All_Enterovirus_D_ORF_Curated_Sequences_Codon_Aligned_Trimmed_CompleteSeqs.fasta")
+```
+
+#Reformat Dates
+```{r}
+EVD_Dates = EVD_Info %>%
+  select(Accession, Collection_Date) %>%
+  filter(!is.na(Collection_Date)) %>%
+  mutate(Accession = paste0(Accession, "_1")) %>%
+  mutate(Date = ifelse(nchar(Collection_Date) == 4, paste0("7/1/", Collection_Date), 
+                       ifelse(substr(Collection_Date, 5, 5) == "-", paste0(substr(Collection_Date, 6, 7), "/15/", substr(Collection_Date, 1, 4)), Collection_Date))) %>%
+  mutate(Date_Format = parse_date_time(Date, "mdy")) %>%
+  mutate(BEAST_Date = decimal_date(Date_Format)) %>%
+  mutate(Year = trunc(BEAST_Date, 0)) %>%
+  select(Accession, Year, BEAST_Date)
+
+write_tsv(EVD_Dates, "EVD_Dates.tsv")
+
+TreeTime_EVD_Dates = EVD_Dates %>%
+  mutate(name = Accession, date = BEAST_Date) %>%
+  select(name, date) 
+
+write_csv(TreeTime_EVD_Dates, "TreeTime_EVD_Dates.csv")
+```
+
+Command line analyses:
+1) Run cd-hit with c = 0.95 on All_Enterovirus_D_ORF_Curated_Sequences_Trimmed_CompleteSeqs.fasta [All_Enterovirus_D_ORF_Curated_Sequences_Trimmed_CompleteSeqs_0.95.fasta]
+
+#Sequence Curation at 95% clustering
+```{r}
+EVD_0.95_Clusters = read_csv("Clustering_0.95/All_Enterovirus_D_ORF_Curated_Sequences_Trimmed_CompleteSeqs_0.95.fasta.bak.clstr", col_names = c("Cluster_Length", "Accession")) %>%
+  mutate(Cluster = substr(Cluster_Length, 1, nchar(Cluster_Length) - 7)) %>%
+  mutate(Accession = ifelse(substr(Accession, 2, 3) == "NC", substr(Accession, 2, 14), substr(Accession, 2, 13))) %>%
+  mutate(Accession = ifelse(substr(Accession, 11, 12) == "..", substr(Accession, 1, 10), Accession)) %>%
+  select(Cluster, Accession)
+
+EVD_Hosts = EVD_Info %>%
+  select(Accession, Host) %>%
+  mutate(Accession = paste0(Accession, "_1"))
+
+EVD_Curation = EVD_0.95_Clusters %>%
+  arrange(Accession) %>%
+  left_join(EVD_Hosts, by = "Accession") %>%
+  filter(Host == "Homo sapiens" | is.na(Host)) %>%
+  left_join(EVD_Dates, by = "Accession") %>%
+  select(Accession, Cluster, Year) %>%
+  filter(!is.na(Year)) %>%
+  distinct(Cluster, Year, .keep_all = TRUE) %>%
+  select(Accession, Year)
+
+write_tsv(EVD_Curation, "Clustering_0.95/Curated_EVD_Sequence_Info.tsv")
+
+EVD_Curated_wDates = EVD_Codon_Alignment_Complete_Sequences[names(EVD_Codon_Alignment_Complete_Sequences) %in% EVD_Curation$Accession]
+writeXStringSet(EVD_Curated_wDates, "Clustering_0.95/All_Enterovirus_D_ORF_Curated_Sequences_Codon_Aligned_Trimmed_CompleteSeqs_0.95.fasta")
+```
+
+Command line + online analyses:
+1) Assign each EVD sequence to a type using this site: https://mpf.rivm.nl/mpf/typingtool/enterovirus/ [EVD_0.95_Types.csv]
+2) Translate sequences to amino acids with EMBOSS [All_Enterovirus_D_ORF_Curated_Sequences_Trimmed_CompleteSeqs_0.95_AA.fasta]
+3) Align amino acid sequences with MAFFT [All_Enterovirus_D_ORF_Curated_Sequences_Trimmed_CompleteSeqs_0.95_AA_Aligned.fasta]
